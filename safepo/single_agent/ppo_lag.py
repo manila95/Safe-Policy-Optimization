@@ -40,6 +40,9 @@ from safepo.common.lagrange import Lagrange
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
+from src.models.risk_models import *
+from src.datasets.risk_datasets import *
+from src.utils import * 
 
 
 default_cfg = {
@@ -100,6 +103,8 @@ def main(args, cfg_env=None):
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
+        use_risk=args.use_risk,
+        risk_size=args.risk_size,
     ).to(device)
     actor_optimizer = torch.optim.Adam(policy.actor.parameters(), lr=3e-4)
     actor_scheduler = LinearLR(
@@ -109,6 +114,23 @@ def main(args, cfg_env=None):
         total_iters=epochs,
         verbose=False,
     )
+    if args.use_risk:
+        risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
+                    "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
+
+        risk_model = BayesRiskEst(obs_size=obs_space.shape[0], batch_norm=True, out_size=args.risk_size)
+        if os.path.exists(args.risk_model_path):
+            risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
+
+        risk_model.to(device)
+        risk_model.eval()
+
+        opt_risk = torch.optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-10)
+
+        if args.fine_tune_risk:
+            rb = ReplayBuffer(buffer_size=args.total_steps)
+
+
     reward_critic_optimizer = torch.optim.Adam(
         policy.reward_critic.parameters(), lr=3e-4
     )
@@ -155,13 +177,19 @@ def main(args, cfg_env=None):
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
     )
+
     # training loop
     for epoch in range(epochs):
         rollout_start_time = time.time()
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
             with torch.no_grad():
-                act, log_prob, value_r, value_c = policy.step(obs, deterministic=False)
+                if args.use_risk:
+                    risk = risk_model(obs)
+                    act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)
+                else:
+                    act, log_prob, value_r, value_c = policy.step(obs, deterministic=False)
+
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
 
@@ -184,6 +212,7 @@ def main(args, cfg_env=None):
                     dtype=torch.float32,
                     device=device,
                 )
+                final_risk = risk_model(info["final_observation"]) if args.use_risk else None
             buffer.store(
                 obs=obs,
                 act=act,
@@ -193,8 +222,10 @@ def main(args, cfg_env=None):
                 value_c=value_c,
                 log_prob=log_prob,
             )
-
+            # print(obs.shape)
             obs = next_obs
+            risk = risk_model(obs) if args.use_risk else None
+            
             epoch_end = steps >= local_steps_per_epoch - 1
             for idx, (done, time_out) in enumerate(zip(terminated, truncated)):
                 if epoch_end or done or time_out:
@@ -203,14 +234,24 @@ def main(args, cfg_env=None):
                     if not done:
                         if epoch_end:
                             with torch.no_grad():
-                                _, _, last_value_r, last_value_c = policy.step(
-                                    obs[idx], deterministic=False
-                                )
+                                if args.use_risk:
+                                    _, _, last_value_r, last_value_c = policy.step(
+                                        obs[idx], risk[idx], deterministic=False
+                                    )
+                                else:
+                                    _, _, last_value_r, last_value_c = policy.step(
+                                        obs[idx], deterministic=False
+                                    )
                         if time_out:
                             with torch.no_grad():
-                                _, _, last_value_r, last_value_c = policy.step(
-                                    info["final_observation"][idx], deterministic=False
-                                )
+                                if args.use_risk:
+                                    _, _, last_value_r, last_value_c = policy.step(
+                                        info["final_observation"][idx], final_risk[idx], deterministic=False
+                                    )
+                                else:  
+                                    _, _, last_value_r, last_value_c = policy.step(
+                                        info["final_observation"][idx], deterministic=False
+                                    )
                         last_value_r = last_value_r.unsqueeze(0)
                         last_value_c = last_value_c.unsqueeze(0)
                     if done or time_out:
@@ -245,7 +286,12 @@ def main(args, cfg_env=None):
                 eval_rew, eval_cost, eval_len = 0.0, 0.0, 0.0
                 while not eval_done:
                     with torch.no_grad():
-                        act, log_prob, value_r, value_c = policy.step(eval_obs, deterministic=True)
+                        if args.use_risk:
+                            risk = risk_model(eval_obs)
+                            act, log_prob, value_r, value_c = policy.step(eval_obs, risk, deterministic=True)
+                        else:
+                            act, log_prob, value_r, value_c = policy.step(eval_obs, deterministic=True)
+
                     next_obs, reward, cost, terminated, truncated, info = env.step(
                         act.detach().squeeze().cpu().numpy()
                     )
@@ -274,7 +320,12 @@ def main(args, cfg_env=None):
 
         # update policy
         data = buffer.get()
-        old_distribution = policy.actor(data["obs"])
+        if args.use_risk:
+            risk = risk_model(data["obs"])
+            old_distribution = policy.actor(data["obs"], risk)
+        else:
+            old_distribution = policy.actor(data["obs"])
+
 
         # comnpute advantage
         advantage = data["adv_r"] - lagrange.lagrangian_multiplier * data["adv_c"]
@@ -304,15 +355,25 @@ def main(args, cfg_env=None):
                 adv_b,
             ) in dataloader:
                 reward_critic_optimizer.zero_grad()
-                loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b), target_value_r_b)
-                cost_critic_optimizer.zero_grad()
-                loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b), target_value_c_b)
+                if args.use_risk:
+                    risk = risk_model(obs_b)
+                    loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk), target_value_r_b)
+                    cost_critic_optimizer.zero_grad()
+                    loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk), target_value_c_b)
+                else:
+                    loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b), target_value_r_b)
+                    cost_critic_optimizer.zero_grad()
+                    loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b), target_value_c_b)
                 if config.get("use_critic_norm", True):
                     for param in policy.reward_critic.parameters():
                         loss_r += param.pow(2).sum() * 0.001
                     for param in policy.cost_critic.parameters():
                         loss_c += param.pow(2).sum() * 0.001
-                distribution = policy.actor(obs_b)
+                if args.use_risk:
+                    # risk = torch.zeros(obs_b.size()[0], args.risk_size).to(device)
+                    distribution = policy.actor(obs_b, risk)
+                else:
+                    distribution = policy.actor(obs_b)
                 log_prob = distribution.log_prob(act_b).sum(dim=-1)
                 ratio = torch.exp(log_prob - log_prob_b)
                 ratio_cliped = torch.clamp(ratio, 0.8, 1.2)
@@ -335,7 +396,11 @@ def main(args, cfg_env=None):
                     }
                 )
 
-            new_distribution = policy.actor(data["obs"])
+            if args.use_risk:
+                risk = risk_model(data["obs"])
+                new_distribution = policy.actor(data["obs"], risk)
+            else:
+                new_distribution = policy.actor(data["obs"])
             kl = (
                 torch.distributions.kl.kl_divergence(old_distribution, new_distribution)
                 .sum(-1, keepdim=True)

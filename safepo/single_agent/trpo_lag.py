@@ -28,6 +28,8 @@ try:
     from isaacgym import gymutil
 except ImportError:
     pass
+    
+import wandb
 import torch
 import torch.nn as nn
 import torch.optim
@@ -167,6 +169,11 @@ def main(args, cfg_env=None):
     torch.backends.cudnn.deterministic = True
     torch.set_num_threads(4)
     device = torch.device(f'{args.device}:{args.device_id}')
+
+    run = wandb.init(config=vars(args), entity="kaustubh95",
+                project="risk_aware_exploration",
+                monitor_gym=True,
+                sync_tensorboard=True, save_code=True)
 
 
     if args.task not in isaac_gym_map.keys():

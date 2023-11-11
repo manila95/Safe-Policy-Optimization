@@ -76,7 +76,7 @@ def main(args, cfg_env=None):
     torch.set_num_threads(4)
     device = torch.device(f'{args.device}:{args.device_id}')
 
-
+    risk_size = args.quantile_num if args.risk_type == "quantile" else 2
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_mujoco_env(
             num_envs=args.num_envs, env_id=args.task, seed=args.seed
@@ -104,7 +104,7 @@ def main(args, cfg_env=None):
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
         use_risk=args.use_risk,
-        risk_size=args.risk_size,
+        risk_size=risk_size,
     ).to(device)
     actor_optimizer = torch.optim.Adam(policy.actor.parameters(), lr=3e-4)
     actor_scheduler = LinearLR(
@@ -118,7 +118,7 @@ def main(args, cfg_env=None):
         risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
                     "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
 
-        risk_model = BayesRiskEst(obs_size=obs_space.shape[0], batch_norm=True, out_size=args.risk_size)
+        risk_model = BayesRiskEst(obs_size=obs_space.shape[0], batch_norm=True, out_size=risk_size)
         if os.path.exists(args.risk_model_path):
             risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
 
@@ -129,6 +129,13 @@ def main(args, cfg_env=None):
 
         if args.fine_tune_risk:
             rb = ReplayBuffer(buffer_size=args.total_steps)
+
+            if args.risk_type == "quantile":
+                weight_tensor = torch.Tensor([1]*args.quantile_num).to(device)
+                weight_tensor[0] = args.risk_weight
+            elif args.risk_type == "binary":
+                weight_tensor = torch.Tensor([1., args.risk_weight]).to(device)
+            risk_criterion = nn.NLLLoss(weight=weight_tensor)
 
 
     reward_critic_optimizer = torch.optim.Adam(
@@ -177,7 +184,7 @@ def main(args, cfg_env=None):
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
     )
-
+    f_next_obs, f_costs = None, None
     # training loop
     for epoch in range(epochs):
         rollout_start_time = time.time()
@@ -200,7 +207,12 @@ def main(args, cfg_env=None):
                 torch.as_tensor(x, dtype=torch.float32, device=device)
                 for x in (next_obs, reward, cost, terminated, truncated)
             )
+            if args.use_risk and args.fine_tune_risk:
+                f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
+                f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
+            # print(info)
             if "final_observation" in info:
+                ## Indicates end of episode
                 info["final_observation"] = np.array(
                     [
                         array if array is not None else np.zeros(obs.shape[-1])
@@ -212,6 +224,14 @@ def main(args, cfg_env=None):
                     dtype=torch.float32,
                     device=device,
                 )
+                if args.use_risk and args.fine_tune_risk:
+                    f_risks = torch.empty_like(f_costs)
+                    for i in range(args.num_envs):
+                        f_risks[:, i] = compute_fear(f_costs[:, i])
+                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, f_risks.view(-1, 1), f_risks.view(-1, 1))
+
+                    f_next_obs, f_costs = None, None
+
                 final_risk = risk_model(info["final_observation"]) if args.use_risk else None
             buffer.store(
                 obs=obs,
@@ -345,6 +365,17 @@ def main(args, cfg_env=None):
         )
         update_counts = 0
         final_kl = torch.ones_like(old_distribution.loc)
+
+        ## Risk Fine Tuning before the policy is updated
+        if args.use_risk and args.fine_tune_risk:
+            risk_data = rb.sample(args.num_risk_samples)
+            risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["risks"].to('cpu'), False, risk_type=args.risk_type,
+                                    fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
+            risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True)
+
+            risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
+            logger.store(*{"risk/risk_loss": risk_loss})
+
         for _ in range(config["learning_iters"]):
             for (
                 obs_b,
@@ -438,7 +469,8 @@ def main(args, cfg_env=None):
             logger.log_tabular("Time/Total", update_end_time - rollout_start_time)
             logger.log_tabular("Value/RewardAdv", data["adv_r"].mean().item())
             logger.log_tabular("Value/CostAdv", data["adv_c"].mean().item())
-
+            if args.use_risk and args.fine_tune_risk:
+                logger.log_tabular("Risk/Risk Loss", risk_loss)
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)

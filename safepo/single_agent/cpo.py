@@ -166,6 +166,12 @@ def main(args, cfg_env=None):
     torch.set_num_threads(4)
     device = torch.device(f'{args.device}:{args.device_id}')
 
+    import wandb
+    run = wandb.init(config=vars(args), entity="kaustubh95",
+                project="risk_aware_exploration",
+                monitor_gym=True,
+                sync_tensorboard=True, save_code=True)
+
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_mujoco_env(

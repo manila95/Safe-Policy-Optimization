@@ -240,6 +240,9 @@ def main(args, cfg_env=None):
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
     )
+    total_cost, eval_total_cost = 0, 0
+    f_next_obs, f_costs = None, None
+
     # training loop
     for epoch in range(epochs):
         rollout_start_time = time.time()
@@ -302,11 +305,13 @@ def main(args, cfg_env=None):
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
+                        total_cost += ep_cost[idx]
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),
                                 "Metrics/EpCost": np.mean(cost_deque),
                                 "Metrics/EpLen": np.mean(len_deque),
+                                "Metrics/TotalCost": total_cost,
                             }
                         )
                         ep_ret[idx] = 0.0
@@ -340,6 +345,7 @@ def main(args, cfg_env=None):
                     eval_len += 1
                     eval_done = terminated[0] or truncated[0]
                     eval_obs = next_obs
+                eval_total_cost += eval_cost
                 eval_rew_deque.append(eval_rew)
                 eval_cost_deque.append(eval_cost)
                 eval_len_deque.append(eval_len)
@@ -348,6 +354,7 @@ def main(args, cfg_env=None):
                     "Metrics/EvalEpRet": np.mean(eval_rew),
                     "Metrics/EvalEpCost": np.mean(eval_cost),
                     "Metrics/EvalEpLen": np.mean(eval_len),
+                    "Metrics/EvalTotalCost": eval_total_cost,
                 }
             )
 
@@ -581,10 +588,13 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpRet")
             logger.log_tabular("Metrics/EpCost")
             logger.log_tabular("Metrics/EpLen")
+            logger.log_tabular("Metrics/TotalCost")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")
                 logger.log_tabular("Metrics/EvalEpLen")
+                logger.log_tabular("Metrics/EvalTotalCost")
+
             logger.log_tabular("Train/Epoch", epoch + 1)
             logger.log_tabular("Train/TotalSteps", (epoch + 1) * args.steps_per_epoch)
             logger.log_tabular("Train/KL")

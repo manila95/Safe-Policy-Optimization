@@ -50,17 +50,19 @@ def build_mlp_network(sizes):
 
 class RiskNet(nn.Module):
     def __init__(self, sizes, risk_size):
+        super().__init__()
         self.affine_obs = nn.Linear(sizes[0], sizes[1])
         self.affine_risk = nn.Linear(risk_size, 12)
         self.activation = nn.Tanh()
 
-        sizes[0] += 12
-        self.rest = build_mlp_network(sizes)
+        sizes[1] += 12
+        self.rest = build_mlp_network(sizes[1:])
 
     def forward(self, x, risk):
+        # print(risk.size())
         obs = self.activation(self.affine_obs(x))
         risk = self.activation(self.affine_risk(risk))
-        x = torch.cat([obs, risk], axis=1)
+        x = torch.cat([obs, risk], axis=-1)
         return self.rest(x)
 
 
@@ -105,6 +107,7 @@ class Actor(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
         super().__init__()
         self.use_risk = use_risk
+        # print(use_risk)
         if use_risk:
             self.mean = build_risk_mlp_network([obs_dim]+hidden_sizes+[act_dim], risk_size)
         else:
@@ -177,9 +180,9 @@ class ActorVCritic(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
         super().__init__()
         self.use_risk = use_risk
-        self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=False, risk_size=None)
-        self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=False, risk_size=None)
-        self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_risk=False, risk_size=None)
+        self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+        self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+        self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
 
     def get_value(self, obs, risk=None):
         """

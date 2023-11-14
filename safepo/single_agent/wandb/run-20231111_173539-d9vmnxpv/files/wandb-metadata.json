@@ -1,0 +1,153 @@
+{
+    "os": "Linux-6.5.0-10-generic-x86_64-with-glibc2.38",
+    "python": "3.9.18",
+    "heartbeatAt": "2023-11-11T22:35:39.447703",
+    "startedAt": "2023-11-11T22:35:39.085161",
+    "docker": null,
+    "cuda": null,
+    "args": [
+        "--fine-tune-risk",
+        "True",
+        "--use-risk",
+        "True"
+    ],
+    "state": "running",
+    "program": "/home/kaustubh/git/risk_aware_exploration/pkgs/Safe-Policy-Optimization/safepo/single_agent/trpo_lag.py",
+    "codePathLocal": "trpo_lag.py",
+    "codePath": "safepo/single_agent/trpo_lag.py",
+    "git": {
+        "remote": "git@github.com:manila95/Safe-Policy-Optimization.git",
+        "commit": "41bdb8205192de234d8e9db2725bd154e6a3331d"
+    },
+    "email": "kaustubh3095@gmail.com",
+    "root": "/home/kaustubh/git/risk_aware_exploration/pkgs/Safe-Policy-Optimization",
+    "host": "meruem",
+    "username": "kaustubh",
+    "executable": "/home/kaustubh/anaconda3/envs/cpo/bin/python",
+    "cpu_count": 14,
+    "cpu_count_logical": 20,
+    "cpu_freq": {
+        "current": 2449.54485,
+        "min": 400.0,
+        "max": 4180.0
+    },
+    "cpu_freq_per_core": [
+        {
+            "current": 4085.056,
+            "min": 400.0,
+            "max": 4600.0
+        },
+        {
+            "current": 3475.19,
+            "min": 400.0,
+            "max": 4600.0
+        },
+        {
+            "current": 3148.299,
+            "min": 400.0,
+            "max": 4600.0
+        },
+        {
+            "current": 2007.001,
+            "min": 400.0,
+            "max": 4600.0
+        },
+        {
+            "current": 3880.188,
+            "min": 400.0,
+            "max": 4700.0
+        },
+        {
+            "current": 4113.255,
+            "min": 400.0,
+            "max": 4700.0
+        },
+        {
+            "current": 4015.47,
+            "min": 400.0,
+            "max": 4700.0
+        },
+        {
+            "current": 3920.081,
+            "min": 400.0,
+            "max": 4700.0
+        },
+        {
+            "current": 3883.562,
+            "min": 400.0,
+            "max": 4600.0
+        },
+        {
+            "current": 3721.438,
+            "min": 400.0,
+            "max": 4600.0
+        },
+        {
+            "current": 3646.105,
+            "min": 400.0,
+            "max": 4600.0
+        },
+        {
+            "current": 3972.192,
+            "min": 400.0,
+            "max": 4600.0
+        },
+        {
+            "current": 3488.707,
+            "min": 400.0,
+            "max": 3500.0
+        },
+        {
+            "current": 3491.123,
+            "min": 400.0,
+            "max": 3500.0
+        },
+        {
+            "current": 3475.993,
+            "min": 400.0,
+            "max": 3500.0
+        },
+        {
+            "current": 3480.75,
+            "min": 400.0,
+            "max": 3500.0
+        },
+        {
+            "current": 1901.176,
+            "min": 400.0,
+            "max": 3500.0
+        },
+        {
+            "current": 400.0,
+            "min": 400.0,
+            "max": 3500.0
+        },
+        {
+            "current": 400.0,
+            "min": 400.0,
+            "max": 3500.0
+        },
+        {
+            "current": 400.0,
+            "min": 400.0,
+            "max": 3500.0
+        }
+    ],
+    "disk": {
+        "/": {
+            "total": 856.654655456543,
+            "used": 248.9442367553711
+        }
+    },
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu_count": 1,
+    "gpu_devices": [
+        {
+            "name": "NVIDIA GeForce RTX 3060 Laptop GPU",
+            "memory_total": 6442450944
+        }
+    ],
+    "memory": {
+        "total": 31.010753631591797
+    }
+}

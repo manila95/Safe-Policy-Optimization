@@ -1,0 +1,114 @@
+wandb_version: 1
+
+seed:
+  desc: null
+  value: 0
+use_eval:
+  desc: null
+  value: false
+task:
+  desc: null
+  value: SafetyPointGoal1-v0
+num_envs:
+  desc: null
+  value: 10
+experiment:
+  desc: null
+  value: single_agent_exp
+log_dir:
+  desc: null
+  value: ../runs/single_agent_exp/SafetyPointGoal1-v0/trpo_lag/seed-000-2023-11-11-17-33-43
+device:
+  desc: null
+  value: cpu
+device_id:
+  desc: null
+  value: 0
+write_terminal:
+  desc: null
+  value: true
+headless:
+  desc: null
+  value: false
+use_risk:
+  desc: null
+  value: true
+fine_tune_risk:
+  desc: null
+  value: true
+risk_model_path:
+  desc: null
+  value: None
+quantile_num:
+  desc: null
+  value: 10
+quantile_size:
+  desc: null
+  value: 4
+fear_radius:
+  desc: null
+  value: 5
+risk_type:
+  desc: null
+  value: quantile
+risk_lr:
+  desc: null
+  value: 1.0e-05
+risk_batch_size:
+  desc: null
+  value: 5000
+num_risk_epochs:
+  desc: null
+  value: 10
+risk_weight:
+  desc: null
+  value: 1.0
+num_risk_samples:
+  desc: null
+  value: 30000
+total_steps:
+  desc: null
+  value: 10000000
+steps_per_epoch:
+  desc: null
+  value: 20000
+randomize:
+  desc: null
+  value: false
+cost_limit:
+  desc: null
+  value: 25.0
+lagrangian_multiplier_init:
+  desc: null
+  value: 0.001
+lagrangian_multiplier_lr:
+  desc: null
+  value: 0.035
+_wandb:
+  desc: null
+  value:
+    code_path: code/safepo/single_agent/trpo_lag.py
+    python_version: 3.9.18
+    cli_version: 0.16.0
+    framework: torch
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1699742025.709667
+    t:
+      1:
+      - 1
+      - 53
+      - 55
+      2:
+      - 1
+      - 53
+      - 55
+      3:
+      - 16
+      - 23
+      - 35
+      4: 3.9.18
+      5: 0.16.0
+      8:
+      - 5
+      13: linux-x86_64

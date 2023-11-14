@@ -183,10 +183,10 @@ def main(args, cfg_env=None):
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
 
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
+        env, obs_space, act_space = make_sa_mujoco_env(args,
             num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        eval_env, _, _ = make_sa_mujoco_env(num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = make_sa_mujoco_env(args, num_envs=1, env_id=args.task, seed=None)
         config = default_cfg
 
     else:
@@ -267,15 +267,18 @@ def main(args, cfg_env=None):
     rew_deque = deque(maxlen=50)
     cost_deque = deque(maxlen=50)
     len_deque = deque(maxlen=50)
+    goal_deque = deque(maxlen=50)
     eval_rew_deque = deque(maxlen=50)
     eval_cost_deque = deque(maxlen=50)
     eval_len_deque = deque(maxlen=50)
+    eval_goal_deque = deque(maxlen=50)
     logger.save_config(dict_args)
     logger.setup_torch_saver(policy.actor)
     logger.log("Start with training.")
     obs, _ = env.reset()
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
-    ep_ret, ep_cost, ep_len = (
+    ep_ret, ep_cost, ep_len, ep_goal = (
+        np.zeros(args.num_envs),
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
@@ -360,15 +363,18 @@ def main(args, cfg_env=None):
                         last_value_r = last_value_r.unsqueeze(0)
                         last_value_c = last_value_c.unsqueeze(0)
                     if done or time_out:
+                        print(info)
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
+                        goal_deque.append(info["final_info"][idx]["cum_goal_met"])
                         total_cost += ep_cost[idx]
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),
                                 "Metrics/EpCost": np.mean(cost_deque),
                                 "Metrics/EpLen": np.mean(len_deque),
+                                "Metrics/EpGoal": np.mean(goal_deque),
                                 "Metrics/TotalCost": total_cost,
                             }
                         )
@@ -408,12 +414,14 @@ def main(args, cfg_env=None):
                 eval_rew_deque.append(eval_rew)
                 eval_cost_deque.append(eval_cost)
                 eval_len_deque.append(eval_len)
+                eval_goal_deque.append(info["final_info"][idx]["cum_goal_met"])
                 eval_total_cost += eval_cost
             logger.store(
                 **{
                     "Metrics/EvalEpRet": np.mean(eval_rew),
                     "Metrics/EvalEpCost": np.mean(eval_cost),
                     "Metrics/EvalEpLen": np.mean(eval_len),
+                    "Metrics/EvalEpGoal": np.mean(eval_goal_deque),
                     "Metrics/EvalTotalCost": eval_total_cost,
                 }
             )
@@ -537,7 +545,7 @@ def main(args, cfg_env=None):
         dataloader = DataLoader(
             dataset=TensorDataset(
                 data["obs"],
-                data["risk"],
+                data["risk"] if args.use_risk else data["obs"],
                 data["target_value_r"],
                 data["target_value_c"],
             ),
@@ -551,7 +559,7 @@ def main(args, cfg_env=None):
                 target_value_r_b,
                 target_value_c_b,
             ) in dataloader:
-                # risk_b = risk_model(obs_b) if args.use_risk else None
+                risk_b = risk_b if args.use_risk else None
                 reward_critic_optimizer.zero_grad()
                 loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
                 cost_critic_optimizer.zero_grad()
@@ -583,11 +591,13 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpCost")
             logger.log_tabular("Metrics/TotalCost")
             logger.log_tabular("Metrics/EpLen")
+            logger.log_tabular("Metrics/EpGoal")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")
                 logger.log_tabular("Metrics/EvalEpLen")
                 logger.log_tabular("Metrics/EvalTotalCost")
+                logger.log_tabular("Metrics/EvalEpGoal")
 
             logger.log_tabular("Train/Epoch", epoch + 1)
             logger.log_tabular("Train/TotalSteps", (epoch + 1) * args.steps_per_epoch)

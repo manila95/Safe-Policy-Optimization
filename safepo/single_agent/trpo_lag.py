@@ -363,7 +363,6 @@ def main(args, cfg_env=None):
                         last_value_r = last_value_r.unsqueeze(0)
                         last_value_c = last_value_c.unsqueeze(0)
                     if done or time_out:
-                        print(info)
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
@@ -584,7 +583,8 @@ def main(args, cfg_env=None):
                     }
                 )
         update_end_time = time.time()
-
+        torch.save(policy.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
+        wandb.save("policy.pt")
         if not logger.logged:
             # log data
             logger.log_tabular("Metrics/EpRet")

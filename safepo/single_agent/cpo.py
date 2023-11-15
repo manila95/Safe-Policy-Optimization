@@ -660,6 +660,9 @@ def main(args, cfg_env=None):
                         "Loss/Loss_cost_critic": loss_c.mean().item(),
                     }
                 )
+
+        torch.save(policy.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
+        wandb.save("policy.pt")
         update_end_time = time.time()
         if not logger.logged:
             # log data

@@ -537,7 +537,7 @@ def main(args, cfg_env=None):
         dataloader = DataLoader(
             dataset=TensorDataset(
                 data["obs"],
-                data["risk"],
+                data["risk"] if args.use_risk else data["obs"],
                 data["target_value_r"],
                 data["target_value_c"],
             ),
@@ -551,7 +551,7 @@ def main(args, cfg_env=None):
                 target_value_r_b,
                 target_value_c_b,
             ) in dataloader:
-                # risk_b = risk_model(obs_b) if args.use_risk else None
+                risk_b = risk_b if args.use_risk else None
                 reward_critic_optimizer.zero_grad()
                 loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
                 cost_critic_optimizer.zero_grad()

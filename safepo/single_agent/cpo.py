@@ -172,6 +172,7 @@ def main(args, cfg_env=None):
     device = torch.device(f'{args.device}:{args.device_id}')
 
     import wandb
+    wandb.login(key="7fd30ee0915aa367ca41345b56bd4fba756ca55a")
     run = wandb.init(config=vars(args), entity="kaustubh95",
                 project="risk_aware_exploration",
                 monitor_gym=True,
@@ -612,7 +613,7 @@ def main(args, cfg_env=None):
         dataloader = DataLoader(
             dataset=TensorDataset(
                 data["obs"],
-                data["risk"],
+                data["risk"] if args.use_risk else data["obs"],
                 data["target_value_r"],
                 data["target_value_c"],
             ),
@@ -626,6 +627,7 @@ def main(args, cfg_env=None):
                 target_value_r_b,
                 target_value_c_b,
             ) in dataloader:
+                risk_b = risk_b if args.use_risk else None 
                 reward_critic_optimizer.zero_grad()
                 loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
                 cost_critic_optimizer.zero_grad()

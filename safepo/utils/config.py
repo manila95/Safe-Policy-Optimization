@@ -165,6 +165,7 @@ def single_agent_args():
         {"name": "--quantile-size", "type": int, "default": 4, "help": "Size of quantiles for risk representation"},
         {"name": "--fear-radius", "type": int, "default": 5, "help": "Fear radius for binary classifier risk"},
         {"name": "--risk-type", "type": str, "default": "quantile", "help": "which type of risk network to use"},
+        {"name": "--risk-update", "type": str, "default": "offline", "help": "which type of risk network to use"},
         {"name": "--risk-lr", "type": float, "default": 1e-5, "help": "risk learning rate finetuning"},
         {"name": "--risk-batch-size", "type": int, "default": 5000, "help": "Fear radius for binary classifier risk"},
         {"name": "--num-risk-epochs", "type": int, "default": 10, "help": "Number of risk epochs to train for"},

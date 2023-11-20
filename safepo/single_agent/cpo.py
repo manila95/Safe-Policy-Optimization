@@ -422,7 +422,7 @@ def main(args, cfg_env=None):
 
         ## Risk Fine Tuning before the policy is updated
         if args.use_risk and args.fine_tune_risk:
-            risk_data = rb.sample(args.num_risk_samples) if args.risk_update == "offline" else rb.slice_data(local_steps_per_epoch, len(rb))
+            risk_data = rb.sample(args.num_risk_samples) if args.risk_update == "offline" else rb.slice_data(len(rb)-steps_per_epoch, len(rb))
             risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["risks"].to('cpu'), False, risk_type=args.risk_type,
                                     fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
             risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True)

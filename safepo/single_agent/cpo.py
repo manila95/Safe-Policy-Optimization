@@ -170,6 +170,7 @@ def main(args, cfg_env=None):
     torch.backends.cudnn.deterministic = True
     torch.set_num_threads(4)
     device = torch.device(f'{args.device}:{args.device_id}')
+    torch.multiprocessing.set_start_method('spawn')# good solution !!!!
 
     import wandb
     run = wandb.init(config=vars(args), entity="kaustubh95",
@@ -423,9 +424,9 @@ def main(args, cfg_env=None):
         ## Risk Fine Tuning before the policy is updated
         if args.use_risk and args.fine_tune_risk:
             risk_data = rb.sample(args.num_risk_samples) if args.risk_update == "offline" else rb.slice_data(len(rb)-steps_per_epoch, len(rb))
-            risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["risks"].to('cpu'), False, risk_type=args.risk_type,
+            risk_dataset = RiskyDataset(risk_data["next_obs"].to(device), None, risk_data["risks"].to(device), False, risk_type=args.risk_type,
                                     fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
-            risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True)
+            risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device=device))
 
             risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
             logger.store(*{"risk/risk_loss": risk_loss})
@@ -661,8 +662,7 @@ def main(args, cfg_env=None):
                     }
                 )
 
-        torch.save(policy.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
-        wandb.save("policy.pt")
+
         update_end_time = time.time()
         if not logger.logged:
             # log data
@@ -710,6 +710,13 @@ def main(args, cfg_env=None):
                     )
         ## Garbage Collection 
         data, dataloader = None, None
+
+    ## Save Policy 
+    torch.save(policy.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
+    wandb.save("policy.pt")
+    if args.use_risk:
+        torch.save(risk_model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
+        wandb.save("risk_model.pt")
     logger.close()
 
 

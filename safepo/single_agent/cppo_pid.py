@@ -44,6 +44,7 @@ from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_para
 from src.models.risk_models import *
 from src.datasets.risk_datasets import *
 from src.utils import * 
+import tqdm
 
 default_cfg = {
     'hidden_sizes': [64, 64],
@@ -82,6 +83,7 @@ def main(args, cfg_env=None):
                 sync_tensorboard=True, save_code=True)
 
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
+    risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num)])
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_mujoco_env(
@@ -237,7 +239,9 @@ def main(args, cfg_env=None):
                     f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
                         f_risks[:, i] = compute_fear(f_costs[:, i])
-                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, f_risks.view(-1, 1), f_risks.view(-1, 1))
+                    e_risks = f_risks.view(-1, 1).cpu().numpy()
+                    e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(e_risks, 1))).to(device)
+                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, e_risks_quant, f_risks.view(-1, 1))
 
                     f_next_obs, f_costs = None, None
 
@@ -340,17 +344,32 @@ def main(args, cfg_env=None):
 
         eval_end_time = time.time()
         ## Risk Fine Tuning before the policy is updated
+        cpu_device = torch.device("cpu")
         if args.use_risk and args.fine_tune_risk:
-            risk_data = rb.sample(args.num_risk_samples) if args.risk_update == "offline" else rb.slice_data(len(rb)-steps_per_epoch, len(rb))
-            risk_dataset = RiskyDataset(risk_data["next_obs"].to(device), None, risk_data["risks"].to(device), False, risk_type=args.risk_type,
-                                    fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
-            risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device=device))
+            if args.risk_update_type == "dataset":
+                risk_data = rb.sample(args.num_risk_samples) if args.risk_update == "offline" else rb.slice_data(len(rb)-steps_per_epoch, len(rb))
+                risk_dataset = RiskyDataset(risk_data["next_obs"].to(cpu_device), None, risk_data["dist_to_fail"].to(cpu_device), False, risk_type=args.risk_type,
+                                        fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
+                risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device=cpu_device))
 
-            risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
-            logger.store(**{"risk/risk_loss": risk_loss})
-            risk_model.eval()
-            risk_data, risk_dataset, risk_dataloader = None, None, None
-
+                risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
+                logger.store(**{"risk/risk_loss": risk_loss})
+                risk_model.eval()
+                risk_data, risk_dataset, risk_dataloader = None, None, None
+            elif args.risk_update_type == "batch":
+                net_loss = 0
+                risk_model.train()
+                for _ in tqdm.tqdm(range(args.num_risk_epochs)):
+                    risk_data = rb.sample(args.risk_batch_size)
+                    pred_risk = risk_model(risk_data["next_obs"].to(device))
+                    risk_loss = risk_criterion(pred_risk, torch.argmax(risk_data["risks"].squeeze(), axis=1).to(device))
+                    opt_risk.zero_grad()
+                    risk_loss.backward()
+                    opt_risk.step()
+                    net_loss += risk_loss.item()
+                net_loss /= args.num_risk_epochs
+                logger.store(**{"risk/risk_loss": net_loss})
+                risk_model.eval()
         # update lagrange multiplier
         ep_costs = logger.get_stats("Metrics/EpCost")
         lagrange.update_lagrange_multiplier(ep_costs)
@@ -376,6 +395,8 @@ def main(args, cfg_env=None):
             ),
             batch_size=config.get("batch_size", args.steps_per_epoch//config.get("num_mini_batch", 1)),
             shuffle=True,
+            num_workers=4, 
+            generator=torch.Generator(device=cpu_device)
         )
         update_counts = 0
         final_kl = torch.ones_like(old_distribution.loc)

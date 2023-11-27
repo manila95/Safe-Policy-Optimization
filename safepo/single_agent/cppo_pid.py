@@ -134,6 +134,9 @@ def main(args, cfg_env=None):
     lagrange = Lagrange(
         cost_limit=args.cost_limit,
         lagrangian_multiplier_init=args.lagrangian_multiplier_init,
+        pid_kd=args.pid_kd,
+        pid_ki=args.pid_ki,
+        pid_kp=args.pid_kp,
     )
 
     # set up the logger

@@ -697,7 +697,7 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/gradient_norm")
             logger.log_tabular("Misc/H_inv_g")
             logger.log_tabular("Misc/AcceptanceStep")
-
+            logger.log_tabular("risk/risk_loss")
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)

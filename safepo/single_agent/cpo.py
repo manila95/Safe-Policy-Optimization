@@ -429,7 +429,7 @@ def main(args, cfg_env=None):
             risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device=device))
 
             risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
-            logger.store(*{"risk/risk_loss": risk_loss})
+            logger.store(**{"risk/risk_loss": risk_loss})
             risk_model.eval()
             risk_data, risk_dataset, risk_dataloader = None, None, None
 
@@ -697,7 +697,8 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/gradient_norm")
             logger.log_tabular("Misc/H_inv_g")
             logger.log_tabular("Misc/AcceptanceStep")
-            logger.log_tabular("risk/risk_loss")
+            if args.use_risk and args.fine_tune_risk:
+                logger.log_tabular("risk/risk_loss")
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)

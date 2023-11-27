@@ -347,7 +347,7 @@ def main(args, cfg_env=None):
             risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device=device))
 
             risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
-            logger.store(*{"risk/risk_loss": risk_loss})
+            logger.store(**{"risk/risk_loss": risk_loss})
             risk_model.eval()
             risk_data, risk_dataset, risk_dataloader = None, None, None
 
@@ -465,7 +465,8 @@ def main(args, cfg_env=None):
             logger.log_tabular("Time/Total", update_end_time - rollout_start_time)
             logger.log_tabular("Value/RewardAdv", data["adv_r"].mean().item())
             logger.log_tabular("Value/CostAdv", data["adv_c"].mean().item())
-            logger.log_tabular("risk/risk_loss")
+            if args.use_risk and args.fine_tune_risk:
+                logger.log_tabular("risk/risk_loss")
 
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:

@@ -720,25 +720,37 @@ def main(args, cfg_env=None):
 
     ## Save Policy 
     torch.save(policy.state_dict(), os.path.join(args.log_dir, "policy.pt"))
-    wandb.save(os.path.join(args.log_dir, "policy.pt"))
+    #wandb.save(os.path.join(args.log_dir, "policy.pt"))
     if args.use_risk:
         torch.save(risk_model.state_dict(), os.path.join(args.log_dir, "risk_model.pt"))
-        wandb.save(os.path.join(args.log_dir, "risk_model.pt"))
+        #wandb.save(os.path.join(args.log_dir, "risk_model.pt"))
+    experiment.log_asset_folder(args.log_dir)
     logger.close()
 
 
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
-    import wandb
-    run = wandb.init(config=vars(args), entity="kaustubh95",
-                project="risk_aware_exploration",
-                monitor_gym=True,
-                sync_tensorboard=True, save_code=True)
+    #import wandb
+    #run = wandb.init(config=vars(args), entity="kaustubh95",
+    #            project="risk_aware_exploration",
+    #            monitor_gym=True,
+    #            sync_tensorboard=True, save_code=True)
+    import comet_ml
+    from torch.utils.tensorboard import SummaryWriter
+    if args.use_risk and args.fine_tune_risk:
+        args.group = "rbs-" + str(args.risk_batch_size) + "-rlr-" + str(args.risk_lr) + "-nre" + str(args.num_risk_epochs)
+    experiment = Experiment(
+        api_key="FlhfmY238jUlHpcRzzuIw3j2t",
+        project_name="risk-aware-exploration",
+        workspace="hbutsuak95",
+    )
+    experiment.add_tag(args.experiment)
+    writer = SummaryWriter()
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
     algo = os.path.basename(__file__).split(".")[0]
-    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, run.name)
+    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, experiment.get_name())
     if not args.write_terminal:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"

@@ -181,7 +181,7 @@ def single_agent_args():
         {"name": "--pid-kp", "type": float, "default": 0.1, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-ki", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-kd", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
-
+        {"name": "--group", "type": str, "default": "None", "help": "thing which will help us group on comet_ml"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

@@ -42,6 +42,7 @@ from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_para
 from src.models.risk_models import *
 from src.datasets.risk_datasets import *
 from src.utils import * 
+import matplotlib.pyplot as plt
 
 STEP_FRACTION=0.8
 CPO_SEARCHING_STEPS=15
@@ -172,14 +173,8 @@ def main(args, cfg_env=None):
     device = torch.device(f'{args.device}:{args.device_id}')
     torch.multiprocessing.set_start_method('spawn')# good solution !!!!
 
-    import wandb
-    run = wandb.init(config=vars(args), entity="kaustubh95",
-                project="risk_aware_exploration",
-                monitor_gym=True,
-                sync_tensorboard=True, save_code=True)
-
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
-
+    risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num)])
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_mujoco_env(args,
             num_envs=args.num_envs, env_id=args.task, seed=args.seed
@@ -230,7 +225,7 @@ def main(args, cfg_env=None):
         opt_risk = torch.optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-10)
 
         if args.fine_tune_risk:
-            rb = ReplayBuffer(buffer_size=args.total_steps)
+            rb = ReplayBuffer(buffer_size=args.total_steps, fear_radius=args.fear_radius, device=device)
 
             if args.risk_type == "quantile":
                 weight_tensor = torch.Tensor([1]*args.quantile_num).to(device)
@@ -278,14 +273,16 @@ def main(args, cfg_env=None):
     )
     total_cost, eval_total_cost = 0, 0
     f_next_obs, f_costs = None, None
-
+    save_obs = obs[0]
+    # risk_stats = np.zeros((epochs, risk_size))
+    flag = 1
     # training loop
     for epoch in range(epochs):
         rollout_start_time = time.time()
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
             with torch.no_grad():
-                risk = risk_model(obs) if args.use_risk else None 
+                risk = torch.exp(risk_model(obs)) if args.use_risk else None 
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
@@ -317,11 +314,13 @@ def main(args, cfg_env=None):
                     f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
                         f_risks[:, i] = compute_fear(f_costs[:, i])
-                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, f_risks.view(-1, 1), f_risks.view(-1, 1))
+                    f_risks = f_risks.view(-1, 1)
+                    e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, f_risks.cpu().numpy())).to(device)
+                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, e_risks_quant, f_risks)
 
                     f_next_obs, f_costs = None, None
 
-                final_risk = risk_model(info["final_observation"]) if args.use_risk else None
+                final_risk = torch.exp(risk_model(info["final_observation"])) if args.use_risk else None
 
             buffer.store(
                 obs=obs,
@@ -334,7 +333,7 @@ def main(args, cfg_env=None):
             )
 
             obs = next_obs
-            risk = risk_model(obs) if args.use_risk else None
+            risk = torch.exp(risk_model(obs)) if args.use_risk else None
             epoch_end = steps >= local_steps_per_epoch - 1
             for idx, (done, time_out) in enumerate(zip(terminated, truncated)):
                 if epoch_end or done or time_out:
@@ -392,7 +391,7 @@ def main(args, cfg_env=None):
                 eval_rew, eval_cost, eval_len = 0.0, 0.0, 0.0
                 while not eval_done:
                     with torch.no_grad():
-                        risk = risk_model(eval_obs) if args.use_risk else None
+                        risk = torch.exp(risk_model(eval_obs)) if args.use_risk else None
                         act, log_prob, value_r, value_c = policy.step(eval_obs, risk, deterministic=True)                  
                     next_obs, reward, cost, terminated, truncated, info = env.step(
                         act.detach().squeeze().cpu().numpy()
@@ -421,22 +420,29 @@ def main(args, cfg_env=None):
 
         eval_end_time = time.time()
 
+
         ## Risk Fine Tuning before the policy is updated
         if args.use_risk and args.fine_tune_risk:
-            risk_data = rb.sample(args.num_risk_samples) if args.risk_update == "offline" else rb.slice_data(len(rb)-steps_per_epoch, len(rb))
-            risk_dataset = RiskyDataset(risk_data["next_obs"].to(device), None, risk_data["risks"].to(device), False, risk_type=args.risk_type,
-                                    fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
-            risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device=device))
+            if False:
+                risk_data = rb.sample(args.num_risk_samples) if args.risk_update == "offline" else rb.slice_data(len(rb)-steps_per_epoch, len(rb))
+                risk_dataset = RiskyDataset(risk_data["next_obs"].to(device), None, risk_data["risks"].to(device), False, risk_type=args.risk_type,
+                                        fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
+                risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device="cpu"))
 
-            risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
-            logger.store(**{"risk/risk_loss": risk_loss})
-            risk_model.eval()
-            risk_data, risk_dataset, risk_dataloader = None, None, None
+                risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
+                logger.store(**{"risk/risk_loss": risk_loss})
+                risk_model.eval()
+                risk_data, risk_dataset, risk_dataloader = None, None, None
+            else:
+                for _ in range(args.num_risk_epochs):
+                    risk_data = rb.sample(args.risk_batch_size)
+                    risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
+                logger.store(**{"risk/risk_loss": risk_loss.item()})
 
         # update policy
         data = buffer.get()
         with torch.no_grad():
-            data["risk"] = risk_model(data["obs"]) if args.use_risk else None
+            data["risk"] = torch.exp(risk_model(data["obs"])) if args.use_risk else None
         fvp_obs = data["obs"][:: 1]
         fvp_risk = data["risk"][:: 1] if args.use_risk else None
         theta_old = get_flat_params_from(policy.actor)
@@ -713,21 +719,26 @@ def main(args, cfg_env=None):
         data, dataloader = None, None
 
     ## Save Policy 
-    torch.save(policy.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
-    wandb.save("policy.pt")
+    torch.save(policy.state_dict(), os.path.join(args.log_dir, "policy.pt"))
+    wandb.save(os.path.join(args.log_dir, "policy.pt"))
     if args.use_risk:
-        torch.save(risk_model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
-        wandb.save("risk_model.pt")
+        torch.save(risk_model.state_dict(), os.path.join(args.log_dir, "risk_model.pt"))
+        wandb.save(os.path.join(args.log_dir, "risk_model.pt"))
     logger.close()
 
 
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
+    import wandb
+    run = wandb.init(config=vars(args), entity="kaustubh95",
+                project="risk_aware_exploration",
+                monitor_gym=True,
+                sync_tensorboard=True, save_code=True)
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
     algo = os.path.basename(__file__).split(".")[0]
-    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, relpath)
+    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, run.name)
     if not args.write_terminal:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"

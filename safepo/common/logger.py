@@ -25,6 +25,8 @@ import joblib
 import numpy as np
 import torch
 from torch.utils.tensorboard.writer import SummaryWriter
+import comet_ml
+
 
 # from safepo.common.mpi_tools import proc_id, mpi_statistics_scalar
 
@@ -147,9 +149,17 @@ class Logger:
         self.use_tensorboard = use_tensorboard
         self.logged = True
 
+        #self.experiment = comet_ml.Experiment(
+        #    api_key="FlhfmY238jUlHpcRzzuIw3j2t",
+        #    project_name="risk-aware-exploration",
+        #    workspace="hbutsuak95",
+        #)
+        #experiment.add_tag(args.experiment)
+
         # Setup tensor board logging if enabled and MPI root process
         if use_tensorboard:
             self.summary_writer = SummaryWriter(os.path.join(self.log_dir, "tb"))
+
 
     def close(self):
         """Close the output file.

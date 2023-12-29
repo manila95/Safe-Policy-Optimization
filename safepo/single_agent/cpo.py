@@ -22,6 +22,7 @@ import sys
 import time
 from collections import deque
 from typing import Callable
+import comet_ml
 
 import numpy as np
 try: 
@@ -171,7 +172,7 @@ def main(args, cfg_env=None):
     torch.backends.cudnn.deterministic = True
     torch.set_num_threads(4)
     device = torch.device(f'{args.device}:{args.device_id}')
-    torch.multiprocessing.set_start_method('spawn')# good solution !!!!
+    #torch.multiprocessing.set_start_method('spawn')# good solution !!!!
 
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num)])
@@ -251,6 +252,7 @@ def main(args, cfg_env=None):
         log_dir=args.log_dir,
         seed=str(args.seed),
     )
+    #logger.experiment.add_tag(args.experiment)
     rew_deque = deque(maxlen=50)
     cost_deque = deque(maxlen=50)
     len_deque = deque(maxlen=50)
@@ -735,22 +737,23 @@ if __name__ == "__main__":
     #            project="risk_aware_exploration",
     #            monitor_gym=True,
     #            sync_tensorboard=True, save_code=True)
-    import comet_ml
-    from torch.utils.tensorboard import SummaryWriter
-    if args.use_risk and args.fine_tune_risk:
-        args.group = "rbs-" + str(args.risk_batch_size) + "-rlr-" + str(args.risk_lr) + "-nre" + str(args.num_risk_epochs)
-    experiment = Experiment(
+    #import comet_ml
+    #from torch.utils.tensorboard import SummaryWriter
+    #if args.use_risk and args.fine_tune_risk:
+    args.group = args.task + "-" + args.risk_model_path + "-rbs-" + str(args.risk_batch_size) + "-rlr-" + str(args.risk_lr) + "-nre" + str(args.num_risk_epochs)
+    experiment = comet_ml.Experiment(
         api_key="FlhfmY238jUlHpcRzzuIw3j2t",
         project_name="risk-aware-exploration",
         workspace="hbutsuak95",
     )
     experiment.add_tag(args.experiment)
-    writer = SummaryWriter()
+    experiment.log_parameters(args)
+    #writer = SummaryWriter()
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
     algo = os.path.basename(__file__).split(".")[0]
-    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, experiment.get_name())
+    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, args.group, experiment.get_name())
     if not args.write_terminal:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"

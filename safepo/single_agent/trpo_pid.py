@@ -175,12 +175,13 @@ def main(args, cfg_env=None):
     torch.set_num_threads(4)
     device = torch.device(f'{args.device}:{args.device_id}')
 
-    run = wandb.init(config=vars(args), entity="kaustubh95",
+    run = wandb.init(config=vars(args), entity="manila95",
                 project="risk_aware_exploration",
                 monitor_gym=True,
                 sync_tensorboard=True, save_code=True)
 
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
+    risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num)])
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_mujoco_env(args,
@@ -326,7 +327,9 @@ def main(args, cfg_env=None):
                     f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
                         f_risks[:, i] = compute_fear(f_costs[:, i])
-                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, f_risks.view(-1, 1), f_risks.view(-1, 1))
+                    f_risks = f_risks.view(-1, 1)
+                    e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, f_risks.cpu().numpy())).to(device)
+                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, e_risks_quant, f_risks)
                     f_next_obs, f_costs = None, None
                 final_risk = risk_model(info["final_observation"]) if args.use_risk else None
 
@@ -434,15 +437,25 @@ def main(args, cfg_env=None):
 
         ## Risk Fine Tuning before the policy is updated
         if args.use_risk and args.fine_tune_risk:
-            risk_data = rb.sample(args.num_risk_samples)
-            risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["risks"].to('cpu'), False, risk_type=args.risk_type,
-                                    fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
-            risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True)
+            if False:
+                risk_data = rb.sample(args.num_risk_samples)
+                risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["risks"].to('cpu'), False, risk_type=args.risk_type,
+                                        fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
+                risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True)
 
-            risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
-            logger.store(*{"risk/risk_loss": risk_loss})
-            risk_model.eval()
-            risk_data, risk_dataset, risk_dataloader = None, None, None
+                risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
+                logger.store(*{"risk/risk_loss": risk_loss})
+                risk_model.eval()
+                risk_data, risk_dataset, risk_dataloader = None, None, None
+            else:
+                if len(rb) > 0:
+                    for _ in range(args.num_risk_epochs):
+                    #if len(rb) > 0:
+                        risk_data = rb.sample(args.risk_batch_size)
+                        risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
+                    logger.store(**{"risk/risk_loss": risk_loss.item()})
+                else:
+                    logger.store(**{"risk/risk_loss": 0})
 
         # update policy
         data = buffer.get()
@@ -621,7 +634,10 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/H_inv_g")
             logger.log_tabular("Misc/AcceptanceStep")
             if args.use_risk and args.fine_tune_risk:
-                logger.log_tabular("Risk/Risk Loss", risk_loss)
+                #try:
+                logger.log_tabular("risk/risk_loss")
+                #except:
+                #    pass
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)
@@ -634,6 +650,12 @@ def main(args, cfg_env=None):
                     )
         ## Garbage Collection 
         data, dataloader = None, None
+    ## Save Policy 
+    torch.save(policy.state_dict(), os.path.join(args.log_dir, "policy.pt"))
+    wandb.save(os.path.join(args.log_dir, "policy.pt"))
+    if args.use_risk:
+        torch.save(risk_model.state_dict(), os.path.join(args.log_dir, "risk_model.pt"))
+        wandb.save(os.path.join(args.log_dir, "risk_model.pt"))
     logger.close()
 
 

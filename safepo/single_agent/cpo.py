@@ -434,10 +434,14 @@ def main(args, cfg_env=None):
                 risk_model.eval()
                 risk_data, risk_dataset, risk_dataloader = None, None, None
             else:
-                for _ in range(args.num_risk_epochs):
-                    risk_data = rb.sample(args.risk_batch_size)
-                    risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
-                logger.store(**{"risk/risk_loss": risk_loss.item()})
+                if len(rb) > 0:
+                    for _ in range(args.num_risk_epochs):
+                    #if len(rb) > 0:
+                        risk_data = rb.sample(args.risk_batch_size)
+                        risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
+                    logger.store(**{"risk/risk_loss": risk_loss.item()})
+                else:
+                    logger.store(**{"risk/risk_loss": 0})
 
         # update policy
         data = buffer.get()
@@ -704,7 +708,10 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/H_inv_g")
             logger.log_tabular("Misc/AcceptanceStep")
             if args.use_risk and args.fine_tune_risk:
+                #try:
                 logger.log_tabular("risk/risk_loss")
+                #except:
+                #    pass
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)
@@ -730,7 +737,7 @@ def main(args, cfg_env=None):
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
     import wandb
-    run = wandb.init(config=vars(args), entity="kaustubh95",
+    run = wandb.init(config=vars(args), entity="manila95",
                 project="risk_aware_exploration",
                 monitor_gym=True,
                 sync_tensorboard=True, save_code=True)

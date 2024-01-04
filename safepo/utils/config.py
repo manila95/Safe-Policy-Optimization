@@ -161,6 +161,7 @@ def single_agent_args():
         {"name": "--use-risk", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Toggles headless mode"},
         {"name": "--fine-tune-risk", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Toggles headless mode"},
         {"name": "--risk-model-path", "type": str, "default": "None", "help": "Risk model path to read from"},
+        {"name": "--policy-model-path", "type": str, "default": "None", "help": "pretrained policy path"},
         {"name": "--quantile-num", "type": int, "default": 10, "help": "Number of quantiles for risk representation"},
         {"name": "--quantile-size", "type": int, "default": 4, "help": "Size of quantiles for risk representation"},
         {"name": "--fear-radius", "type": int, "default": 25, "help": "Fear radius for binary classifier risk"},

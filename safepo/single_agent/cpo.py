@@ -210,6 +210,9 @@ def main(args, cfg_env=None):
     cost_critic_optimizer = torch.optim.Adam(
         policy.cost_critic.parameters(), lr=1e-3
     )
+    if os.path.exists(args.policy_model_path):
+        policy.load_state_dict(torch.load(args.policy_model_path))#, map_location=device))
+        print("Pretrained Policy loaded successfully")
 
     if args.use_risk:
         risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
@@ -217,7 +220,8 @@ def main(args, cfg_env=None):
 
         risk_model = BayesRiskEst(obs_size=obs_space.shape[0], batch_norm=True, out_size=risk_size)
         if os.path.exists(args.risk_model_path):
-            risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
+            risk_model.load_state_dict(torch.load(args.risk_model_path)) #, map_location=device))
+            print("Pretrained Risk model loaded successfully")
 
         risk_model.to(device)
         risk_model.eval()

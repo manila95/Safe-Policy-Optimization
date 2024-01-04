@@ -175,10 +175,10 @@ def main(args, cfg_env=None):
     torch.set_num_threads(4)
     device = torch.device(f'{args.device}:{args.device_id}')
 
-    run = wandb.init(config=vars(args), entity="manila95",
-                project="risk_aware_exploration",
-                monitor_gym=True,
-                sync_tensorboard=True, save_code=True)
+    #run = wandb.init(config=vars(args), entity="manila95",
+    #            project="risk_aware_exploration",
+    #            monitor_gym=True,
+    #            sync_tensorboard=True, save_code=True)
 
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num)])
@@ -599,6 +599,12 @@ def main(args, cfg_env=None):
         update_end_time = time.time()
         torch.save(policy.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
         wandb.save("policy.pt")
+        if args.use_risk:
+            torch.save(risk_model.state_dict(), os.path.join(args.log_dir, "risk_model.pt"))
+            wandb.save(os.path.join(args.log_dir, "risk_model.pt"))
+
+
+
         if not logger.logged:
             # log data
             logger.log_tabular("Metrics/EpRet")
@@ -661,11 +667,16 @@ def main(args, cfg_env=None):
 
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
+    import wandb
+    run = wandb.init(config=vars(args), entity="manila95",
+                project="risk_aware_exploration",
+                monitor_gym=True,
+                sync_tensorboard=True, save_code=True)
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
     algo = os.path.basename(__file__).split(".")[0]
-    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, relpath)
+    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, run.name)
     if not args.write_terminal:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"

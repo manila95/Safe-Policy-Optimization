@@ -217,8 +217,9 @@ def main(args, cfg_env=None):
     if args.use_risk:
         risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
                     "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
-
-        risk_model = BayesRiskEst(obs_size=obs_space.shape[0], batch_norm=True, out_size=risk_size)
+         
+        risk_input_shape = obs_space.shape[0]+act_space.shape[0] if args.risk_input == "state_action" else obs_space.shape[0]
+        risk_model = BayesRiskEst(obs_size=risk_input_shape, batch_norm=True, out_size=risk_size)
         if os.path.exists(args.risk_model_path):
             risk_model.load_state_dict(torch.load(args.risk_model_path)) #, map_location=device))
             print("Pretrained Risk model loaded successfully")
@@ -286,7 +287,13 @@ def main(args, cfg_env=None):
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
             with torch.no_grad():
-                risk = torch.exp(risk_model(obs)) if args.use_risk else None 
+                if args.use_risk:
+                    if epoch < args.start_using_risk:
+                        risk = torch.as_tensor(np.zeros((args.num_envs, risk_size)), dtype=torch.float32, device=device)
+                    else:
+                        risk = torch.exp(risk_model(torch.cat([obs, torch.zeros(args.num_envs, act_space.shape[0])], axis=-1))) if args.risk_input=="state_action" else torch.exp(risk_model(obs)) 
+                else:
+                    risk = None 
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
@@ -294,13 +301,22 @@ def main(args, cfg_env=None):
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
-            next_obs, reward, cost, terminated, truncated = (
+            next_obs, action, reward, cost, terminated, truncated = (
                 torch.as_tensor(x, dtype=torch.float32, device=device)
-                for x in (next_obs, reward, cost, terminated, truncated)
+                for x in (next_obs, action, reward, cost, terminated, truncated)
             )
+            #print(obs.size(), next_obs.size(), action.size())
             if args.use_risk and args.fine_tune_risk:
-                f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
-                f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
+                if args.risk_input == "state_action":
+                    obs_action = torch.cat([obs, action], axis=-1)
+                    next_obs_action = torch.cat([next_obs, torch.zeros_like(action)], axis=-1)
+                    f_next_obs = obs_action.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, obs_action.unsqueeze(0)], axis=0)
+                    f_next_obs = next_obs_action.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs_action.unsqueeze(0)], axis=0)
+                    f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
+                    f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
+                else:
+                    f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
+                    f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
             if "final_observation" in info:
                 info["final_observation"] = np.array(
@@ -320,12 +336,14 @@ def main(args, cfg_env=None):
                         f_risks[:, i] = compute_fear(f_costs[:, i])
                     f_risks = f_risks.view(-1, 1)
                     e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, f_risks.cpu().numpy())).to(device)
-                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, e_risks_quant, f_risks)
+                    rb.add(None, f_next_obs.view(-1, risk_input_shape), None, None, None, None, e_risks_quant, f_risks)
 
                     f_next_obs, f_costs = None, None
 
-                final_risk = torch.exp(risk_model(info["final_observation"])) if args.use_risk else None
-
+                if args.use_risk:
+                    final_risk = torch.exp(risk_model(torch.cat([info["final_observation"], torch.zeros(args.num_envs, act_space.shape[0])], axis=-1))) if args.risk_input == "state_action" else torch.exp(risk_model(info["final_observation"]))
+                else:
+                    final_risk = None
             buffer.store(
                 obs=obs,
                 act=act,
@@ -337,7 +355,14 @@ def main(args, cfg_env=None):
             )
 
             obs = next_obs
-            risk = torch.exp(risk_model(obs)) if args.use_risk else None
+            if args.use_risk:
+                if epoch < args.start_using_risk:
+                    risk = torch.zeros((obs.size()[0], risk_size))
+                else:
+                    risk = torch.exp(risk_model(torch.cat([obs, torch.zeros(args.num_envs, act_space.shape[0])], axis=-1))) if args.risk_input == "state_action" else torch.exp(risk_model(obs))
+            else:
+                risk = None
+
             epoch_end = steps >= local_steps_per_epoch - 1
             for idx, (done, time_out) in enumerate(zip(terminated, truncated)):
                 if epoch_end or done or time_out:
@@ -450,7 +475,13 @@ def main(args, cfg_env=None):
         # update policy
         data = buffer.get()
         with torch.no_grad():
-            data["risk"] = torch.exp(risk_model(data["obs"])) if args.use_risk else None
+            if args.use_risk:
+                if epoch < args.start_using_risk:
+                    data["risk"] = torch.zeros((data["act"].size()[0], risk_size))
+                else:
+                    data["risk"] = torch.exp(risk_model(torch.cat([data["obs"], torch.zeros_like(data["act"])], axis=-1))) if args.risk_input == "state_action" else torch.exp(risk_model(data["obs"]))
+            else:
+                data["risk"] = None 
         fvp_obs = data["obs"][:: 1]
         fvp_risk = data["risk"][:: 1] if args.use_risk else None
         theta_old = get_flat_params_from(policy.actor)

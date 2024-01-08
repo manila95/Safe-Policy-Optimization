@@ -294,7 +294,13 @@ def main(args, cfg_env=None):
                         risk = torch.exp(risk_model(torch.cat([obs, torch.zeros(args.num_envs, act_space.shape[0])], axis=-1))) if args.risk_input=="state_action" else torch.exp(risk_model(obs)) 
                 else:
                     risk = None 
-                act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
+                act, dist, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)
+                # while torch.exp(risk_model(torch.cat([obs, act], axis=-1)))[:, 0] 
+                # print(torch.exp(risk_model(torch.cat([obs, act], axis=-1))))
+                # print(0.2, torch.exp(risk_model(torch.cat([obs, 0.2*act], axis=-1))))
+                # print(0.1, torch.exp(risk_model(torch.cat([obs, 0.1*act], axis=-1))))
+                # print(0.01, torch.exp(risk_model(torch.cat([obs, 0.01*act], axis=-1))))
+
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
 
@@ -305,7 +311,7 @@ def main(args, cfg_env=None):
                 torch.as_tensor(x, dtype=torch.float32, device=device)
                 for x in (next_obs, action, reward, cost, terminated, truncated)
             )
-            #print(obs.size(), next_obs.size(), action.size())
+            obs, next_obs, action = obs.reshape((args.num_envs, obs_space.shape[0])), next_obs.reshape((args.num_envs, obs_space.shape[0])), action.reshape((args.num_envs, act_space.shape[0]))
             if args.use_risk and args.fine_tune_risk:
                 if args.risk_input == "state_action":
                     obs_action = torch.cat([obs, action], axis=-1)
@@ -372,13 +378,13 @@ def main(args, cfg_env=None):
                         if epoch_end:
                             with torch.no_grad():
                                 risk_idx = risk[idx] if args.use_risk else None
-                                _, _, last_value_r, last_value_c = policy.step(
+                                _, _, _, last_value_r, last_value_c = policy.step(
                                     obs[idx], risk_idx, deterministic=False
                                 )
                         if time_out:
                             with torch.no_grad():
                                 final_risk_idx = final_risk[idx] if args.use_risk else None
-                                _, _, last_value_r, last_value_c = policy.step(
+                                _, _, _, last_value_r, last_value_c = policy.step(
                                     info["final_observation"][idx], final_risk_idx, deterministic=False
                                 )
                         last_value_r = last_value_r.unsqueeze(0)
@@ -452,8 +458,8 @@ def main(args, cfg_env=None):
 
         ## Risk Fine Tuning before the policy is updated
         if args.use_risk and args.fine_tune_risk:
-            if False:
-                risk_data = rb.sample(args.num_risk_samples) if args.risk_update == "offline" else rb.slice_data(len(rb)-steps_per_epoch, len(rb))
+            if epoch == 50:
+                risk_data = rb.sample(len(rb))
                 risk_dataset = RiskyDataset(risk_data["next_obs"].to(device), None, risk_data["risks"].to(device), False, risk_type=args.risk_type,
                                         fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
                 risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device="cpu"))
@@ -463,14 +469,7 @@ def main(args, cfg_env=None):
                 risk_model.eval()
                 risk_data, risk_dataset, risk_dataloader = None, None, None
             else:
-                if len(rb) > 0:
-                    for _ in range(args.num_risk_epochs):
-                    #if len(rb) > 0:
-                        risk_data = rb.sample(args.risk_batch_size)
-                        risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
-                    logger.store(**{"risk/risk_loss": risk_loss.item()})
-                else:
-                    logger.store(**{"risk/risk_loss": 0})
+                logger.store(**{"risk/risk_loss": 0})
 
         # update policy
         data = buffer.get()

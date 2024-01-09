@@ -227,7 +227,7 @@ class ActorVCritic(nn.Module):
         else:
             value_r = self.reward_critic(obs)
             value_c = self.cost_critic(obs)
-        return action, log_prob, value_r, value_c
+        return action, dist, log_prob, value_r, value_c
 
 class MultiAgentActor(nn.Module):
     """

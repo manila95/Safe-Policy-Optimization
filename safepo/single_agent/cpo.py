@@ -460,7 +460,7 @@ def main(args, cfg_env=None):
         if args.use_risk and args.fine_tune_risk:
             if epoch == 50:
                 risk_data = rb.sample(len(rb))
-                risk_dataset = RiskyDataset(risk_data["next_obs"].to(device), None, risk_data["risks"].to(device), False, risk_type=args.risk_type,
+                risk_dataset = RiskyDataset(risk_data["next_obs"].to(device), None, risk_data["dist_to_fail"].to(device), False, risk_type=args.risk_type,
                                         fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
                 risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device="cpu"))
 

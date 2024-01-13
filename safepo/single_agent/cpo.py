@@ -297,7 +297,7 @@ def main(args, cfg_env=None):
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
-
+            print(cost, terminated)
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
@@ -387,7 +387,7 @@ def main(args, cfg_env=None):
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
-                        goal_deque.append(info["final_info"][idx]["cum_goal_met"])
+                        goal_deque.append(info["final_info"]["cum_goal_met"])
                         total_cost += ep_cost[idx]
                         logger.store(
                             **{
@@ -435,7 +435,7 @@ def main(args, cfg_env=None):
                 eval_rew_deque.append(eval_rew)
                 eval_cost_deque.append(eval_cost)
                 eval_len_deque.append(eval_len)
-                eval_goal_deque.append(info["final_info"][idx]["cum_goal_met"])
+                eval_goal_deque.append(info["final_info"]["cum_goal_met"])
 
             logger.store(
                 **{

@@ -151,7 +151,7 @@ def single_agent_args():
         {"name": "--failure-penalty", "type": float, "default": 0.0, "help": "failure penalty reward "},
         {"name": "--reward-distance", "type": float, "default": 1.0, "help": "reward for distance thing (dense reward) "},
         {"name": "--reward-goal", "type": float, "default": 1.0, "help": "reward for achieving the goal  "},
-        {"name": "--num-envs", "type": int, "default": 10, "help": "The number of parallel game environments"},
+        {"name": "--num-envs", "type": int, "default": 1, "help": "The number of parallel game environments"},
         {"name": "--experiment", "type": str, "default": "single_agent_exp", "help": "Experiment name"},
         {"name": "--log-dir", "type": str, "default": "./runs", "help": "directory to save agent logs"},
         {"name": "--device", "type": str, "default": "cpu", "help": "The device to run the model on"},

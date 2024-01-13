@@ -501,7 +501,7 @@ def main(args, cfg_env=None):
         assert torch.isfinite(x).all(), "x is not finite"
         xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
         assert xHx.item() >= 0, "xHx is negative"
-        alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
+        alpha = torch.sqrt(2 * args.target_kl / (xHx + 1e-8))
 
         policy.actor.zero_grad()
         temp_distribution = policy.actor(data["obs"], data["risk"])
@@ -519,7 +519,8 @@ def main(args, cfg_env=None):
         q = xHx
         r = grads.dot(p)
         s = b_grads.dot(p)
-
+        print(s)
+        print(ep_costs**2 / (s + 1e-8), ep_costs)
         if b_grads.dot(b_grads) <= 1e-6 and ep_costs < 0:
             A = torch.zeros(1)
             B = torch.zeros(1)
@@ -529,7 +530,7 @@ def main(args, cfg_env=None):
             assert torch.isfinite(s).all(), "s is not finite"
 
             A = q - r**2 / (s + 1e-8)
-            B = 2 * config['target_kl'] - ep_costs**2 / (s + 1e-8)
+            B = 2 * args.target_kl - ep_costs**2 / (s + 1e-8)
 
             if ep_costs < 0 and B < 0:
                 optim_case = 3
@@ -541,9 +542,9 @@ def main(args, cfg_env=None):
             else:
                 optim_case = 0
                 logger.log("Alert! Attempting infeasible recovery!", "red")
-
+        print(optim_case)
         if optim_case in (3, 4):
-            alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
+            alpha = torch.sqrt(2 * args.target_kl / (xHx + 1e-8))
             nu_star = torch.zeros(1)
             lambda_star = 1 / (alpha + 1e-8)
             step_direction = alpha * x
@@ -557,7 +558,7 @@ def main(args, cfg_env=None):
                 return torch.clamp(data, low, high)
 
             lambda_a = torch.sqrt(A / B)
-            lambda_b = torch.sqrt(q / (2 * config['target_kl']))
+            lambda_b = torch.sqrt(q / (2 * args.target_kl))
             r_num = r.item()
             eps_cost = ep_costs + 1e-8
             if ep_costs < 0:
@@ -579,7 +580,7 @@ def main(args, cfg_env=None):
                 return -0.5 * (A / (lam + 1e-8) + B * lam) - r * ep_costs / (s + 1e-8)
 
             def f_b(lam: torch.Tensor) -> torch.Tensor:
-                return -0.5 * (q / (lam + 1e-8) + 2 * config['target_kl'] * lam)
+                return -0.5 * (q / (lam + 1e-8) + 2 * args.target_kl * lam)
 
             lambda_star = (
                 lambda_a_star
@@ -593,7 +594,7 @@ def main(args, cfg_env=None):
 
         else:
             lambda_star = torch.zeros(1)
-            nu_star = torch.sqrt(2 * config['target_kl'] / (s + 1e-8))
+            nu_star = torch.sqrt(2 * args.target_kl / (s + 1e-8))
             step_direction = -nu_star * p
 
         step_frac = 1.0
@@ -638,7 +639,7 @@ def main(args, cfg_env=None):
                 logger.log("INFO: did not improve improve <0")
             elif loss_cost_diff > max(-ep_costs, 0):
                 logger.log(f"INFO: no improve {loss_cost_diff} > {max(-ep_costs, 0)}")
-            elif kl > config["target_kl"]:
+            elif kl > args.target_kl:
                 logger.log(f"INFO: violated KL constraint {kl} at step {step + 1}.")
             else:
                 logger.log(f"Accept step at i={step + 1}")

@@ -170,9 +170,9 @@ def main(args, cfg_env=None):
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_mujoco_env(
-            num_envs=args.num_envs, env_id=args.task, seed=args.seed
+            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        eval_env, _, _ = make_sa_mujoco_env(num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = make_sa_mujoco_env(args, num_envs=1, env_id=args.task, seed=None)
         config = default_cfg
 
     else:
@@ -523,6 +523,12 @@ def main(args, cfg_env=None):
                         },
                         itr = epoch
                     )
+    ## Save Policy
+    torch.save(policy.state_dict(), os.path.join(args.log_dir, "policy.pt"))
+    wandb.save(os.path.join(args.log_dir, "policy.pt"))
+    if args.use_risk:
+        torch.save(risk_model.state_dict(), os.path.join(args.log_dir, "risk_model.pt"))
+        wandb.save(os.path.join(args.log_dir, "risk_model.pt"))
     logger.close()
 
 
@@ -531,8 +537,13 @@ if __name__ == "__main__":
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
+    import wandb
+    run = wandb.init(config=vars(args), entity="manila95",
+                project="risk_aware_exploration",
+                monitor_gym=True,
+                sync_tensorboard=True, save_code=True)
     algo = os.path.basename(__file__).split(".")[0]
-    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, relpath)
+    args.log_dir = os.path.join(args.log_dir, args.experiment if run.sweep_id is None else run.sweep_id, args.task, algo, run.name)
     if not args.write_terminal:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"

@@ -44,7 +44,7 @@ from src.datasets.risk_datasets import *
 from src.utils import * 
 import matplotlib.pyplot as plt
 
-STEP_FRACTION=0.8
+STEP_FRACTION=0.1
 CPO_SEARCHING_STEPS=15
 CONJUGATE_GRADIENT_ITERS=15
 
@@ -331,16 +331,17 @@ def main(args, cfg_env=None):
                     device=device,
                 )
                 if args.use_risk and args.fine_tune_risk:
-                    f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
-                        f_risks[:, i] = compute_fear(f_costs[:, i])
-                        #if cost[i] > 0:
-                        #    print(f_risks[:, i])
-                    f_risks = f_risks.view(-1, 1)
-                    
-                    e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, f_risks.cpu().numpy())).to(device)
-                    rb.add(None, f_next_obs.view(-1, risk_input_shape), None, None, None, None, e_risks_quant, f_risks)
-                    print(len(rb))
+                        if info["final_observation"][i] is None and cost[i] > 0:
+                            print(i)
+                            continue
+                        e_risks = np.array(list(reversed(range(int(ep_len[i])))))
+                        f_risks = torch.Tensor(e_risks) 
+                        print(f_risks)
+                        print(f_next_obs[:, i].size())
+                        e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, f_risks.cpu().numpy())).to(device)
+                        rb.add(None, f_next_obs[:, i].view(-1, risk_input_shape), None, None, None, None, e_risks_quant, f_risks)
+
                     f_next_obs, f_costs = None, None
 
                 if args.use_risk:
@@ -351,7 +352,7 @@ def main(args, cfg_env=None):
                 obs=obs,
                 act=act,
                 reward=reward,
-                cost=cost,
+                cost=cost*args.cost_multiplier,
                 value_r=value_r,
                 value_c=value_c,
                 log_prob=log_prob,
@@ -455,25 +456,26 @@ def main(args, cfg_env=None):
 
         ## Risk Fine Tuning before the policy is updated
         if args.use_risk and args.fine_tune_risk:
-            if False:
-                risk_data = rb.sample(args.num_risk_samples) if args.risk_update == "offline" else rb.slice_data(len(rb)-steps_per_epoch, len(rb))
-                risk_dataset = RiskyDataset(risk_data["next_obs"].to(device), None, risk_data["risks"].to(device), False, risk_type=args.risk_type,
+            if len(rb) > args.fear_radius*100 and epoch % args.risk_update_period == 0:
+                risk_data = rb.sample(args.num_risk_samples)
+                risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["dist_to_fail"].to('cpu'), False, risk_type=args.risk_type,
                                         fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
-                risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device="cpu"))
+                risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True)
 
                 risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
-                logger.store(**{"risk/risk_loss": risk_loss})
+                logger.store(*{"risk/risk_loss": risk_loss})
                 risk_model.eval()
                 risk_data, risk_dataset, risk_dataloader = None, None, None
-            else:
-                if len(rb) > 0:
-                    for _ in range(args.num_risk_epochs):
-                    #if len(rb) > 0:
-                        risk_data = rb.sample(args.risk_batch_size)
-                        risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
-                    logger.store(**{"risk/risk_loss": risk_loss.item()})
-                else:
-                    logger.store(**{"risk/risk_loss": 0})
+            # else:
+            #     print(len(rb))
+            #     if len(rb) > 0:
+            #         for _ in range(args.num_risk_epochs):
+            #         #if len(rb) > 0:
+            #             risk_data = rb.sample(args.risk_batch_size)
+            #             risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
+            #         logger.store(**{"risk/risk_loss": risk_loss.item()})
+            #     else:
+            #         logger.store(**{"risk/risk_loss": 0})
 
         # update policy
         data = buffer.get()
@@ -516,14 +518,12 @@ def main(args, cfg_env=None):
         loss_pi_c.backward()
 
         b_grads = get_flat_gradients_from(policy.actor)
-        ep_costs = logger.get_stats("Metrics/EpCost") - args.cost_limit
-
+        ep_costs = logger.get_stats("Metrics/EpCost") * args.cost_multiplier - args.cost_limit * (1 - epoch / epochs)
+        print(args.cost_limit * (1 - epoch / epochs))
         p = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, b_grads, CONJUGATE_GRADIENT_ITERS)
         q = xHx
         r = grads.dot(p)
         s = b_grads.dot(p)
-        print(s)
-        print(ep_costs**2 / (s + 1e-8), ep_costs)
         if b_grads.dot(b_grads) <= 1e-6 and ep_costs < 0:
             A = torch.zeros(1)
             B = torch.zeros(1)
@@ -545,7 +545,6 @@ def main(args, cfg_env=None):
             else:
                 optim_case = 0
                 logger.log("Alert! Attempting infeasible recovery!", "red")
-        print(optim_case)
         if optim_case in (3, 4):
             alpha = torch.sqrt(2 * args.target_kl / (xHx + 1e-8))
             nu_star = torch.zeros(1)
@@ -776,7 +775,6 @@ def main(args, cfg_env=None):
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
     import wandb
-    wandb.login(key="e5d6d74c569a61c765e1ef12ffffc6d7923ec3db")
     run = wandb.init(config=vars(args), entity="manila95",
                 project="risk_aware_exploration",
                 monitor_gym=True,
@@ -785,7 +783,7 @@ if __name__ == "__main__":
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
     algo = os.path.basename(__file__).split(".")[0]
-    args.log_dir = os.path.join(args.log_dir, args.experiment if run.sweep_id is None else run.sweep_id, args.task, algo, run.name)
+    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, run.name)
     if not args.write_terminal:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"

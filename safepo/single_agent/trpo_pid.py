@@ -233,7 +233,7 @@ def main(args, cfg_env=None):
         opt_risk = torch.optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-10)
 
         if args.fine_tune_risk:
-            rb = ReplayBuffer(buffer_size=args.total_steps)
+            rb = ReplayBuffer(buffer_size=args.total_steps, fear_radius=args.fear_radius)
 
             if args.risk_type == "quantile":
                 weight_tensor = torch.Tensor([1]*args.quantile_num).to(device)
@@ -327,8 +327,8 @@ def main(args, cfg_env=None):
                     f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
                         f_risks[:, i] = compute_fear(f_costs[:, i])
-                        if cost[i] > 0:
-                            print(f_risks[:, i])
+                        # if cost[i] > 0:
+                        #     print(f_risks[:, i])
                     f_risks = f_risks.view(-1, 1)
                     
                     e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, f_risks.cpu().numpy())).to(device)
@@ -342,7 +342,7 @@ def main(args, cfg_env=None):
                 obs=obs,
                 act=act,
                 reward=reward,
-                cost=cost,
+                cost=cost* args.cost_multiplier,
                 value_r=value_r,
                 value_c=value_c,
                 log_prob=log_prob,
@@ -376,6 +376,7 @@ def main(args, cfg_env=None):
                         len_deque.append(ep_len[idx])
                         goal_deque.append(info["final_info"][idx]["cum_goal_met"])
                         total_cost += ep_cost[idx]
+                        print(ep_cost, total_cost)
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),
@@ -436,12 +437,12 @@ def main(args, cfg_env=None):
         eval_end_time = time.time()
 
         # update lagrange multiplier
-        ep_costs = logger.get_stats("Metrics/EpCost")
+        ep_costs = logger.get_stats("Metrics/EpCost")* args.cost_multiplier
         lagrange.update_lagrange_multiplier(ep_costs)
 
         ## Risk Fine Tuning before the policy is updated
         if args.use_risk and args.fine_tune_risk:
-            if False:
+            if len(rb) > args.fear_radius*100 and epoch % args.risk_update_period == 0:
                 risk_data = rb.sample(args.num_risk_samples)
                 risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["risks"].to('cpu'), False, risk_type=args.risk_type,
                                         fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
@@ -451,15 +452,15 @@ def main(args, cfg_env=None):
                 logger.store(*{"risk/risk_loss": risk_loss})
                 risk_model.eval()
                 risk_data, risk_dataset, risk_dataloader = None, None, None
-            else:
-                if len(rb) > 0:
-                    for _ in range(args.num_risk_epochs):
-                    #if len(rb) > 0:
-                        risk_data = rb.sample(args.risk_batch_size)
-                        risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
-                    logger.store(**{"risk/risk_loss": risk_loss.item()})
-                else:
-                    logger.store(**{"risk/risk_loss": 0})
+            # else:
+            #     if len(rb) > 0:
+            #         for _ in range(args.num_risk_epochs):
+            #         #if len(rb) > 0:
+            #             risk_data = rb.sample(args.risk_batch_size)
+            #             risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
+            #         logger.store(**{"risk/risk_loss": risk_loss.item()})
+            #     else:
+            #         logger.store(**{"risk/risk_loss": 0})
 
         # update policy
         data = buffer.get()

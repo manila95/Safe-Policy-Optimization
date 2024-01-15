@@ -366,7 +366,7 @@ def main(args, cfg_env=None):
 
         ## Risk Fine Tuning before the policy is updated
         if args.use_risk and args.fine_tune_risk:
-            if len(rb) > args.fear_radius*100 and epoch % args.risk_update_period == 0:
+            if len(rb) > 0 and epoch % args.risk_update_period == 0:
                 risk_data = rb.sample(args.num_risk_samples)
                 risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["dist_to_fail"].to('cpu'), False, risk_type=args.risk_type,
                                         fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)

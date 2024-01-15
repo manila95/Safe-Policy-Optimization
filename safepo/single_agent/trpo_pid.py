@@ -327,10 +327,14 @@ def main(args, cfg_env=None):
                     f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
                         f_risks[:, i] = compute_fear(f_costs[:, i])
+                        if cost[i] > 0:
+                            print(f_risks[:, i])
                     f_risks = f_risks.view(-1, 1)
+                    
                     e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, f_risks.cpu().numpy())).to(device)
                     rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, e_risks_quant, f_risks)
                     f_next_obs, f_costs = None, None
+                    print(len(rb))
                 final_risk = risk_model(info["final_observation"]) if args.use_risk else None
 
 
@@ -676,7 +680,7 @@ if __name__ == "__main__":
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
     algo = os.path.basename(__file__).split(".")[0]
-    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, run.name)
+    args.log_dir = os.path.join(args.log_dir, args.experiment if run.sweep_id is None else run.sweep_id, args.task, algo, run.name)
     if not args.write_terminal:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"

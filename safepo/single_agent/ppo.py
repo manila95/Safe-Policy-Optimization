@@ -366,25 +366,26 @@ def main(args, cfg_env=None):
 
         ## Risk Fine Tuning before the policy is updated
         if args.use_risk and args.fine_tune_risk:
-            if False:
-                risk_data = rb.sample(args.num_risk_samples) if args.risk_update == "offline" else rb.slice_data(len(rb)-steps_per_epoch, len(rb))
-                risk_dataset = RiskyDataset(risk_data["next_obs"].to(device), None, risk_data["risks"].to(device), False, risk_type=args.risk_type,
+            if len(rb) > args.fear_radius*100 and epoch % args.risk_update_period == 0:
+                risk_data = rb.sample(args.num_risk_samples)
+                risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["dist_to_fail"].to('cpu'), False, risk_type=args.risk_type,
                                         fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
-                risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device="cpu"))
+                risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True)
 
                 risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
                 logger.store(**{"risk/risk_loss": risk_loss})
                 risk_model.eval()
                 risk_data, risk_dataset, risk_dataloader = None, None, None
             else:
-                if len(rb) > 0:
-                    for _ in range(args.num_risk_epochs):
-                    #if len(rb) > 0:
-                        risk_data = rb.sample(args.risk_batch_size)
-                        risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
-                    logger.store(**{"risk/risk_loss": risk_loss.item()})
-                else:
-                    logger.store(**{"risk/risk_loss": 0})
+            #     print(len(rb))
+            #     if len(rb) > 0:
+            #         for _ in range(args.num_risk_epochs):
+            #         #if len(rb) > 0:
+            #             risk_data = rb.sample(args.risk_batch_size)
+            #             risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
+            #         logger.store(**{"risk/risk_loss": risk_loss.item()})
+            #     else:
+                logger.store(**{"risk/risk_loss": 0})
 
         # update policy
         data = buffer.get()

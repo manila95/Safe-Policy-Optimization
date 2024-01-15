@@ -463,7 +463,7 @@ def main(args, cfg_env=None):
                 risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True)
 
                 risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
-                logger.store(*{"risk/risk_loss": risk_loss})
+                logger.store(**{"risk/risk_loss": risk_loss})
                 risk_model.eval()
                 risk_data, risk_dataset, risk_dataloader = None, None, None
             else:

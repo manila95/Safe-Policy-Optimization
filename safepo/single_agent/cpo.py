@@ -331,18 +331,17 @@ def main(args, cfg_env=None):
                     device=device,
                 )
                 if args.use_risk and args.fine_tune_risk:
+                    f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
-                        if info["final_observation"][i] is None and cost[i] > 0:
-                            print(i)
-                            continue
-                        e_risks = np.array(list(reversed(range(int(ep_len[i])))))
-                        f_risks = torch.Tensor(e_risks) 
-                        print(f_risks)
-                        print(f_next_obs[:, i].size())
-                        e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, f_risks.cpu().numpy())).to(device)
-                        rb.add(None, f_next_obs[:, i].view(-1, risk_input_shape), None, None, None, None, e_risks_quant, f_risks)
+                        f_risks[:, i] = compute_fear(f_costs[:, i])
+                        # if cost[i] > 0:
+                        #    print(f_risks[:, i])
+                    f_risks = f_risks.view(-1, 1)
 
+                    e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, f_risks.cpu().numpy())).to(device)
+                    rb.add(None, f_next_obs.view(-1, risk_input_shape), None, None, None, None, e_risks_quant, f_risks)
                     f_next_obs, f_costs = None, None
+
 
                 if args.use_risk:
                     final_risk = torch.exp(risk_model(torch.cat([info["final_observation"], torch.zeros(args.num_envs, act_space.shape[0])], axis=-1))) if args.risk_input == "state_action" else torch.exp(risk_model(info["final_observation"]))
@@ -393,6 +392,7 @@ def main(args, cfg_env=None):
                         len_deque.append(ep_len[idx])
                         goal_deque.append(info["final_info"][idx]["cum_goal_met"])
                         total_cost += ep_cost[idx]
+                        print(total_cost, len(rb))
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),
@@ -466,7 +466,7 @@ def main(args, cfg_env=None):
                 logger.store(*{"risk/risk_loss": risk_loss})
                 risk_model.eval()
                 risk_data, risk_dataset, risk_dataloader = None, None, None
-            # else:
+            else:
             #     print(len(rb))
             #     if len(rb) > 0:
             #         for _ in range(args.num_risk_epochs):
@@ -475,7 +475,7 @@ def main(args, cfg_env=None):
             #             risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
             #         logger.store(**{"risk/risk_loss": risk_loss.item()})
             #     else:
-            #         logger.store(**{"risk/risk_loss": 0})
+                logger.store(**{"risk/risk_loss": 0})
 
         # update policy
         data = buffer.get()
@@ -518,7 +518,7 @@ def main(args, cfg_env=None):
         loss_pi_c.backward()
 
         b_grads = get_flat_gradients_from(policy.actor)
-        ep_costs = logger.get_stats("Metrics/EpCost") * args.cost_multiplier - args.cost_limit * (1 - epoch / epochs)
+        ep_costs = logger.get_stats("Metrics/EpCost") * args.cost_multiplier - min(args.cost_limit * (1 - epoch / epochs), 0.05)
         print(args.cost_limit * (1 - epoch / epochs))
         p = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, b_grads, CONJUGATE_GRADIENT_ITERS)
         q = xHx

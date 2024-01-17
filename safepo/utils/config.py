@@ -174,6 +174,8 @@ def single_agent_args():
         {"name": "--num-risk-epochs", "type": int, "default": 10, "help": "Number of risk epochs to train for"},
         {"name": "--risk-weight", "type": float, "default": 1.0, "help": "weight to handle imbalance "},
         {"name": "--start-using-risk", "type": int, "default": 0, "help": "Total timesteps of the experiments"},
+        {"name": "--start-risk-update", "type": int, "default": 15000, "help": "Total timesteps of the experiments"},
+        {"name": "--risk-update-period", "type": int, "default": 10, "help": "Total timesteps of the experiments"},
         {"name": "--num-risk-samples", "type": int, "default": 30000, "help": "Total timesteps of the experiments"},
         {"name": "--total-steps", "type": int, "default": 10000000, "help": "Total timesteps of the experiments"},
         {"name": "--steps-per-epoch", "type": int, "default": 20000, "help": "The number of steps to run in each environment per policy rollout"},

@@ -281,6 +281,7 @@ def main(args, cfg_env=None):
     save_obs = obs[0]
     # risk_stats = np.zeros((epochs, risk_size))
     flag = 1
+    global_step = 0
     # training loop
     for epoch in range(epochs):
         rollout_start_time = time.time()
@@ -318,6 +319,15 @@ def main(args, cfg_env=None):
                     f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
                     f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
+            if args.use_risk and args.fine_tune_risk:
+                if len(rb) > args.start_risk_update and global_step % args.risk_update_period == 0:
+                    # for _ in range(args.num_risk_epochs):
+                    risk_data = rb.sample(args.risk_batch_size)
+                    risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
+                    logger.store(**{"risk/risk_loss": risk_loss.item()})
+                else:
+                    logger.store(**{"risk/risk_loss": 0})
+            
             if "final_observation" in info:
                 info["final_observation"] = np.array(
                     [
@@ -362,7 +372,7 @@ def main(args, cfg_env=None):
                     risk = torch.exp(risk_model(torch.cat([obs, torch.zeros(args.num_envs, act_space.shape[0])], axis=-1))) if args.risk_input == "state_action" else torch.exp(risk_model(obs))
             else:
                 risk = None
-
+            global_step += args.num_envs
             epoch_end = steps >= local_steps_per_epoch - 1
             for idx, (done, time_out) in enumerate(zip(terminated, truncated)):
                 if epoch_end or done or time_out:
@@ -448,29 +458,6 @@ def main(args, cfg_env=None):
             )
 
         eval_end_time = time.time()
-
-
-        ## Risk Fine Tuning before the policy is updated
-        if args.use_risk and args.fine_tune_risk:
-            if False:
-                risk_data = rb.sample(args.num_risk_samples) if args.risk_update == "offline" else rb.slice_data(len(rb)-steps_per_epoch, len(rb))
-                risk_dataset = RiskyDataset(risk_data["next_obs"].to(device), None, risk_data["risks"].to(device), False, risk_type=args.risk_type,
-                                        fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
-                risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device="cpu"))
-
-                risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
-                logger.store(**{"risk/risk_loss": risk_loss})
-                risk_model.eval()
-                risk_data, risk_dataset, risk_dataloader = None, None, None
-            else:
-                if len(rb) > 0:
-                    for _ in range(args.num_risk_epochs):
-                    #if len(rb) > 0:
-                        risk_data = rb.sample(args.risk_batch_size)
-                        risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
-                    logger.store(**{"risk/risk_loss": risk_loss.item()})
-                else:
-                    logger.store(**{"risk/risk_loss": 0})
 
         # update policy
         data = buffer.get()

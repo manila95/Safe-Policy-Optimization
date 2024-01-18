@@ -169,7 +169,7 @@ def main(args, cfg_env=None):
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = True
-    torch.set_num_threads(4)
+    torch.set_num_threads(5)
     device = torch.device(f'{args.device}:{args.device_id}')
     torch.multiprocessing.set_start_method('spawn')# good solution !!!!
 
@@ -281,11 +281,13 @@ def main(args, cfg_env=None):
     save_obs = obs[0]
     # risk_stats = np.zeros((epochs, risk_size))
     flag = 1
+    global_step = 0
     # training loop
     for epoch in range(epochs):
         rollout_start_time = time.time()
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
+            global_step += 1
             with torch.no_grad():
                 if args.use_risk:
                     if epoch < args.start_using_risk:
@@ -318,6 +320,17 @@ def main(args, cfg_env=None):
                     f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
                     f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
+
+            if args.use_risk and args.fine_tune_risk:
+                 if len(rb) > 1000 and global_step % args.risk_update_period == 0:
+                     #for _ in range(args.num_risk_epochs):
+                     risk_data = rb.sample(args.risk_batch_size)
+                     risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
+                     #print(risk_loss)
+                     logger.store(**{"risk/risk_loss": risk_loss.item()})
+                 else:
+                     logger.store(**{"risk/risk_loss": 0})
+
             if "final_observation" in info:
                 info["final_observation"] = np.array(
                     [
@@ -392,7 +405,7 @@ def main(args, cfg_env=None):
                         len_deque.append(ep_len[idx])
                         goal_deque.append(info["final_info"][idx]["cum_goal_met"])
                         total_cost += ep_cost[idx]
-                        print(total_cost, len(rb))
+                        #print(total_cost, len(rb))
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),
@@ -455,7 +468,7 @@ def main(args, cfg_env=None):
 
 
         ## Risk Fine Tuning before the policy is updated
-        if args.use_risk and args.fine_tune_risk:
+        if False: #args.use_risk and args.fine_tune_risk:
             if len(rb) > args.fear_radius*100 and epoch % args.risk_update_period == 0:
                 risk_data = rb.sample(args.num_risk_samples)
                 risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["dist_to_fail"].to('cpu'), False, risk_type=args.risk_type,
@@ -476,7 +489,7 @@ def main(args, cfg_env=None):
             #         logger.store(**{"risk/risk_loss": risk_loss.item()})
             #     else:
                 logger.store(**{"risk/risk_loss": 0})
-
+        #logger.store(**{"risk/risk_loss": risk_loss.item()})
         # update policy
         data = buffer.get()
         with torch.no_grad():
@@ -775,15 +788,26 @@ def main(args, cfg_env=None):
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
     import wandb
+    import os 
+    log_dir = os.path.join("/logs", args.experiment)
+    os.system("wandb offline")
+    try:
+        os.makedirs(log_dir)
+    except:
+        pass
+#    log_dir = os.path.join("/logs", args.experiment)
     run = wandb.init(config=vars(args), entity="manila95",
                 project="risk_aware_exploration",
                 monitor_gym=True,
+                dir=log_dir,
                 sync_tensorboard=True, save_code=True)
+    #print(run.sweep_id)
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
     algo = os.path.basename(__file__).split(".")[0]
-    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, run.name)
+    print(wandb.run.dir)
+    args.log_dir = wandb.run.dir #os.path.join(args.log_dir, args.experiment, args.task, algo, wandb.run.dir.split("/")[-2])
     if not args.write_terminal:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"

@@ -790,7 +790,7 @@ if __name__ == "__main__":
     import wandb
     import os 
     log_dir = os.path.join("/logs", args.experiment)
-    os.system("wandb offline")
+    #os.system("wandb offline")
     try:
         os.makedirs(log_dir)
     except:

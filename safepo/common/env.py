@@ -58,7 +58,7 @@ def make_sa_mujoco_env(cfg, num_envs: int, env_id: str, seed: int|None = None):
     if num_envs > 1:
         def create_env() -> Callable:
             """Creates an environment that can enable or disable the environment checker."""
-            env = safety_gymnasium.make(env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+            env = safety_gymnasium.make(env_id)#, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
             env = SafeRescaleAction(env, -1.0, 1.0)
             return env
         env_fns = [create_env for _ in range(num_envs)]
@@ -68,7 +68,7 @@ def make_sa_mujoco_env(cfg, num_envs: int, env_id: str, seed: int|None = None):
         obs_space = env.single_observation_space
         act_space = env.single_action_space
     else:
-        env = safety_gymnasium.make(env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+        env = safety_gymnasium.make(env_id)#, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
         env.reset(seed=seed)
         obs_space = env.observation_space
         act_space = env.action_space

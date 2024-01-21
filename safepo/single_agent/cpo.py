@@ -320,7 +320,7 @@ def main(args, cfg_env=None):
                     f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
             if args.use_risk and args.fine_tune_risk:
-                if len(rb) > args.start_risk_update and global_step % args.risk_update_period == 0:
+                if len(rb) > args.risk_batch_size and global_step % args.risk_update_period == 0:
                     # for _ in range(args.num_risk_epochs):
                     risk_data = rb.sample(args.risk_batch_size)
                     risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
@@ -406,6 +406,7 @@ def main(args, cfg_env=None):
                                 "Metrics/EpLen": np.mean(len_deque),
                                 "Metrics/EpGoal": np.mean(goal_deque),
                                 "Metrics/TotalCost": total_cost,
+                                "Metrics/ViolationRate": np.mean(np.array(list(cost_deque)) > args.cost_limit)
 
                             }
                         )
@@ -704,6 +705,7 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpLen")
             logger.log_tabular("Metrics/TotalCost")
             logger.log_tabular("Metrics/EpGoal")
+            logger.log_tabular("Metrics/ViolationRate")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")
@@ -760,15 +762,22 @@ def main(args, cfg_env=None):
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
     import wandb
-    run = wandb.init(config=vars(args), entity="manila95",
+    import os
+    try:
+        os.makedirs(os.path.join("/logs", args.experiment))
+    except:
+        pass
+    run = wandb.init(config=vars(args), entity="kaustubh_umontreal",
                 project="risk_aware_exploration",
                 monitor_gym=True,
+                dir=os.path.join("/logs",args.experiment),
                 sync_tensorboard=True, save_code=True)
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
     algo = os.path.basename(__file__).split(".")[0]
-    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, run.name)
+
+    args.log_dir = wandb.run.dir #os.path.join(args.log_dir, args.experiment, args.task, algo, run.name)
     if not args.write_terminal:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"

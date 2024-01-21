@@ -287,7 +287,7 @@ def main(args, cfg_env=None):
     )
     total_cost, eval_total_cost = 0, 0
     f_next_obs, f_costs = None, None
-
+    global_step = 0
     # training loop
     for epoch in range(epochs):
         rollout_start_time = time.time()
@@ -308,9 +308,26 @@ def main(args, cfg_env=None):
                 for x in (next_obs, reward, cost, terminated, truncated)
             )
             if args.use_risk and args.fine_tune_risk:
-                f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
-                f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
+                if args.risk_input == "state_action":
+                    obs_action = torch.cat([obs, action], axis=-1)
+                    next_obs_action = torch.cat([next_obs, torch.zeros_like(action)], axis=-1)
+                    f_next_obs = obs_action.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, obs_action.unsqueeze(0)], axis=0)
+                    f_next_obs = next_obs_action.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs_action.unsqueeze(0)], axis=0)
+                    f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
+                    f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
+                else:
+                    f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
+                    f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
+            if args.use_risk and args.fine_tune_risk:
+                if len(rb) > args.risk_batch_size and global_step % args.risk_update_period == 0:
+                    # for _ in range(args.num_risk_epochs):
+                    risk_data = rb.sample(args.risk_batch_size)
+                    risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
+                    logger.store(**{"risk/risk_loss": risk_loss.item()})
+                else:
+                    logger.store(**{"risk/risk_loss": 0})
+
             if "final_observation" in info:
                 info["final_observation"] = np.array(
                     [
@@ -332,7 +349,7 @@ def main(args, cfg_env=None):
                     rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, e_risks_quant, f_risks)
                     f_next_obs, f_costs = None, None
                 final_risk = risk_model(info["final_observation"]) if args.use_risk else None
-
+            global_step += args.num_envs
 
             buffer.store(
                 obs=obs,
@@ -434,28 +451,6 @@ def main(args, cfg_env=None):
         # update lagrange multiplier
         ep_costs = logger.get_stats("Metrics/EpCost")
         lagrange.update_lagrange_multiplier(ep_costs)
-
-        ## Risk Fine Tuning before the policy is updated
-        if args.use_risk and args.fine_tune_risk:
-            if False:
-                risk_data = rb.sample(args.num_risk_samples)
-                risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["risks"].to('cpu'), False, risk_type=args.risk_type,
-                                        fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
-                risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True)
-
-                risk_loss = train_risk(risk_model, risk_dataloader, risk_criterion, opt_risk, args.num_risk_epochs, device)
-                logger.store(*{"risk/risk_loss": risk_loss})
-                risk_model.eval()
-                risk_data, risk_dataset, risk_dataloader = None, None, None
-            else:
-                if len(rb) > 0:
-                    for _ in range(args.num_risk_epochs):
-                    #if len(rb) > 0:
-                        risk_data = rb.sample(args.risk_batch_size)
-                        risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
-                    logger.store(**{"risk/risk_loss": risk_loss.item()})
-                else:
-                    logger.store(**{"risk/risk_loss": 0})
 
         # update policy
         data = buffer.get()
@@ -668,15 +663,21 @@ def main(args, cfg_env=None):
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
     import wandb
+    import os
+    try:
+        os.makedirs(os.path.join("/logs", args.experiment))
+    except:
+        pass
     run = wandb.init(config=vars(args), entity="manila95",
                 project="risk_aware_exploration",
                 monitor_gym=True,
+                dir=os.path.join("/logs",args.experiment),
                 sync_tensorboard=True, save_code=True)
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
     algo = os.path.basename(__file__).split(".")[0]
-    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, run.name)
+    args.log_dir = wandb.run.dir #os.path.join(args.log_dir, args.experiment, args.task, algo, run.name)
     if not args.write_terminal:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"

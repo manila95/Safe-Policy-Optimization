@@ -159,6 +159,7 @@ def single_agent_args():
         {"name": "--write-terminal", "type": lambda x: bool(strtobool(x)), "default": True, "help": "Toggles terminal logging"},
         {"name": "--headless", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Toggles headless mode"},
         {"name": "--use-risk", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Toggles headless mode"},
+        {"name": "--cpo-searching-steps", "type": int, "default": 15, "help": "Number of quantiles for risk representation"},
         {"name": "--fine-tune-risk", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Toggles headless mode"},
         {"name": "--risk-model-path", "type": str, "default": "None", "help": "Risk model path to read from"},
         {"name": "--policy-model-path", "type": str, "default": "None", "help": "pretrained policy path"},

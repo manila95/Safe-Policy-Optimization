@@ -320,7 +320,7 @@ def main(args, cfg_env=None):
                     f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
             if args.use_risk and args.fine_tune_risk:
-                if len(rb) > args.risk_batch_size and global_step % args.risk_update_period == 0:
+                if epoch > args.start_risk_update and global_step % args.risk_update_period == 0:
                     # for _ in range(args.num_risk_epochs):
                     risk_data = rb.sample(args.risk_batch_size)
                     risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
@@ -590,7 +590,7 @@ def main(args, cfg_env=None):
         expected_reward_improve = grads.dot(step_direction)
 
         kl = torch.zeros(1)
-        for step in range(CPO_SEARCHING_STEPS):
+        for step in range(args.cpo_searching_steps):
             new_theta = theta_old + step_frac * step_direction
             set_param_values_to_model(policy.actor, new_theta)
             acceptance_step = step + 1

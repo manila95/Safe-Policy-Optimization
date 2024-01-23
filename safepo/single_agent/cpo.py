@@ -320,7 +320,7 @@ def main(args, cfg_env=None):
                     f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
             if args.use_risk and args.fine_tune_risk:
-                if len(rb) > args.risk_batch_size and global_step % args.risk_update_period == 0:
+                if epoch > args.start_risk_update and global_step % args.risk_update_period == 0:
                     # for _ in range(args.num_risk_epochs):
                     risk_data = rb.sample(args.risk_batch_size)
                     risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
@@ -767,7 +767,7 @@ if __name__ == "__main__":
         os.makedirs(os.path.join("/logs", args.experiment))
     except:
         pass
-    run = wandb.init(config=vars(args), entity="kaustubh_umontreal",
+    run = wandb.init(config=vars(args), entity="manila95",
                 project="risk_aware_exploration",
                 monitor_gym=True,
                 dir=os.path.join("/logs",args.experiment),

@@ -269,7 +269,7 @@ def main(args, cfg_env=None):
     logger.save_config(dict_args)
     logger.setup_torch_saver(policy.actor)
     logger.log("Start with training.")
-    obs, _ = env.reset()
+    obs = env.reset()
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
     ep_ret, ep_cost, ep_len = (
         np.zeros(args.num_envs),
@@ -296,14 +296,14 @@ def main(args, cfg_env=None):
                     risk = None 
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
-            next_obs, reward, cost, terminated, truncated, info = env.step(action)
-
+            next_obs, reward, done, info = env.step(action)
+            cost = info["cost"]; print(cost)
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
-            next_obs, action, reward, cost, terminated, truncated = (
+            next_obs, action, reward, cost, done = (
                 torch.as_tensor(x, dtype=torch.float32, device=device)
-                for x in (next_obs, action, reward, cost, terminated, truncated)
+                for x in (next_obs, action, reward, cost, done)
             )
             #print(obs.size(), next_obs.size(), action.size())
             if args.use_risk and args.fine_tune_risk:
@@ -318,15 +318,15 @@ def main(args, cfg_env=None):
                     f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
                     f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
-            if "final_observation" in info:
-                info["final_observation"] = np.array(
+            if "terminal_observation" in info:
+                info["terminal_observation"] = np.array(
                     [
                         array if array is not None else np.zeros(obs.shape[-1])
-                        for array in info["final_observation"]
+                        for array in info["terminal_observation"]
                     ],
                 )
-                info["final_observation"] = torch.as_tensor(
-                    info["final_observation"],
+                info["terminal_observation"] = torch.as_tensor(
+                    info["terminal_observation"],
                     dtype=torch.float32,
                     device=device,
                 )
@@ -344,9 +344,10 @@ def main(args, cfg_env=None):
 
 
                 if args.use_risk:
-                    final_risk = torch.exp(risk_model(torch.cat([info["final_observation"], torch.zeros(args.num_envs, act_space.shape[0])], axis=-1))) if args.risk_input == "state_action" else torch.exp(risk_model(info["final_observation"]))
+                    final_risk = torch.exp(risk_model(torch.cat([info["terminal_observation"], torch.zeros(args.num_envs, act_space.shape[0])], axis=-1))) if args.risk_input == "state_action" else torch.exp(risk_model(info["terminal_observation"]))
                 else:
                     final_risk = None
+            print(obs.size(), cost.size(), reward.size(), act.size())
             buffer.store(
                 obs=obs,
                 act=act,
@@ -382,7 +383,7 @@ def main(args, cfg_env=None):
                             with torch.no_grad():
                                 final_risk_idx = final_risk[idx] if args.use_risk else None
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    info["final_observation"][idx], final_risk_idx, deterministic=False
+                                    info["terminal_observation"][idx], final_risk_idx, deterministic=False
                                 )
                         last_value_r = last_value_r.unsqueeze(0)
                         last_value_c = last_value_c.unsqueeze(0)
@@ -390,7 +391,7 @@ def main(args, cfg_env=None):
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
-                        goal_deque.append(info["final_info"][idx]["cum_goal_met"])
+                        goal_deque.append(info[idx]["episode"]["goal_met"])
                         total_cost += ep_cost[idx]
                         print(total_cost, len(rb))
                         logger.store(
@@ -439,7 +440,7 @@ def main(args, cfg_env=None):
                 eval_rew_deque.append(eval_rew)
                 eval_cost_deque.append(eval_cost)
                 eval_len_deque.append(eval_len)
-                eval_goal_deque.append(info["final_info"][idx]["cum_goal_met"])
+                eval_goal_deque.append(info[idx]["episode"]["goal_met"])
 
             logger.store(
                 **{

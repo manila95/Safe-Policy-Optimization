@@ -32,6 +32,8 @@ from safety_gymnasium.wrappers import SafeAutoResetWrapper, SafeRescaleAction, S
 from safety_gymnasium.vector.async_vector_env import SafetyAsyncVectorEnv
 from safepo.common.wrappers import ShareSubprocVecEnv, ShareDummyVecEnv, ShareEnv, SafeNormalizeObservation, MultiGoalEnv
 
+import gym 
+import bullet_safety_gym
 def make_sa_mujoco_env(cfg, num_envs: int, env_id: str, seed: int|None = None):
     """
     Creates and wraps an environment based on the specified parameters.
@@ -55,32 +57,28 @@ def make_sa_mujoco_env(cfg, num_envs: int, env_id: str, seed: int|None = None):
         >>>     seed=0
         >>> )
     """
-    if num_envs > 1:
+    if True: #num_envs > 1:
         def create_env() -> Callable:
             """Creates an environment that can enable or disable the environment checker."""
-            env = safety_gymnasium.make(env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost,\
-                                     failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance,\
-                                     num_steps=cfg.num_steps, action_noise=cfg.action_noise)
-            env = SafeRescaleAction(env, -1.0, 1.0)
+            env = gym.make(env_id)
+            # env = SafeRescaleAction(env, -1.0, 1.0)
             return env
         env_fns = [create_env for _ in range(num_envs)]
-        env = SafetyAsyncVectorEnv(env_fns)
-        env = SafeNormalizeObservation(env)
-        env.reset(seed=seed)
+        env = gym.vector.AsyncVectorEnv(env_fns)
+        # env = SafeNormalizeObservation(env)
+        # env.reset(seed=seed)
         obs_space = env.single_observation_space
         act_space = env.single_action_space
     else:
-        env = safety_gymnasium.make(env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost,\
-                                     failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance,\
-                                    num_steps=cfg.num_steps, action_noise=cfg.action_noise)
+        env = gym.make(env_id)
 
-        env.reset(seed=seed)
+        # env.reset(seed=seed)
         obs_space = env.observation_space
         act_space = env.action_space
-        env = SafeAutoResetWrapper(env)
-        env = SafeRescaleAction(env, -1.0, 1.0)
-        env = SafeNormalizeObservation(env)
-        env = SafeUnsqueeze(env)
+        # env = SafeAutoResetWrapper(env)
+        # env = SafeRescaleAction(env, -1.0, 1.0)
+        # env = SafeNormalizeObservation(env)
+        # env = SafeUnsqueeze(env)
     
     return env, obs_space, act_space
 

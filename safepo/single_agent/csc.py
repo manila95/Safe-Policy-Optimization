@@ -609,7 +609,7 @@ if __name__ == "__main__":
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
     import wandb
-    run = wandb.init(config=vars(args), entity="kaustubh_umontreal",
+    run = wandb.init(config=vars(args), entity="manila95",
                 project="risk_aware_exploration",
                 monitor_gym=True,
                 sync_tensorboard=True, save_code=True)

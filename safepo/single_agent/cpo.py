@@ -520,17 +520,18 @@ def main(args, cfg_env=None):
             A = q - r**2 / (s + 1e-8)
             B = 2 * args.target_kl - ep_costs**2 / (s + 1e-8)
 
-            if ep_costs < 0 and B < 0:
-                optim_case = 3
-            elif ep_costs < 0 <= B:
-                optim_case = 2
-            elif ep_costs >= 0 and B >= 0:
-                optim_case = 1
-                logger.log("Alert! Attempting feasible recovery!", "yellow")
-            else:
-                optim_case = 0
-                logger.log("Alert! Attempting infeasible recovery!", "red")
-        print(optim_case)
+        #     if ep_costs < 0 and B < 0:
+        #         optim_case = 3
+        #     elif ep_costs < 0 <= B:
+        #         optim_case = 2
+        #     elif ep_costs >= 0 and B >= 0:
+        #         optim_case = 1  
+        #         logger.log("Alert! Attempting feasible recovery!", "yellow")
+        #     else:
+        #         optim_case = 0
+        #         logger.log("Alert! Attempting infeasible recovery!", "red")
+        # print(optim_case)
+        optim_case = 1
         if optim_case in (3, 4):
             alpha = torch.sqrt(2 * args.target_kl / (xHx + 1e-8))
             nu_star = torch.zeros(1)

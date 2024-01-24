@@ -55,6 +55,9 @@ class VectorizedOnPolicyBuffer:
                 "obs": torch.zeros(
                     (size, *obs_space.shape), dtype=torch.float32, device=device
                 ),
+                "next_obs": torch.zeros(
+                    (size, *obs_space.shape), dtype=torch.float32, device=device
+                ),
                 "act": torch.zeros(
                     (size, *act_space.shape), dtype=torch.float32, device=device
                 ),

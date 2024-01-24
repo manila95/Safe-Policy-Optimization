@@ -162,7 +162,7 @@ def fvp(
 
 def compute_loss_qc(ac, ac_targ, data, obs_dim, act_dim, gamma, loss_fn, alpha=5.):
     o, a, c, o2, d = [data[s] for s in ('obs', 'act', 'cost', 'obs2', 'done')]
-    print(o.size(), a.size())
+    # print(o.size(), a.size())
     q = ac.cost_critic(torch.cat([o, a], axis=-1))
     with torch.no_grad():
         pi_next = ac_targ.actor(o2)
@@ -278,7 +278,8 @@ def main(args, cfg_env=None):
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
             with torch.no_grad():
-                act, log_prob, value_r, value_c = policy.step(obs, deterministic=False)
+                act, log_prob, value_r, value_c = policy.step(obs, deterministic=False, eps=0.6)
+            # print(value_c)
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
 
@@ -331,8 +332,8 @@ def main(args, cfg_env=None):
                                 _, _, last_value_r, last_value_c = policy.step(
                                     info["final_observation"][idx], deterministic=False
                                 )
-                        last_value_r = last_value_r.unsqueeze(0)
-                        last_value_c = last_value_c.unsqueeze(0)
+                        # last_value_r = last_value_r.unsqueeze(0)
+                        # last_value_c = last_value_c.unsqueeze(0)
                     if done or time_out:
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
@@ -595,7 +596,7 @@ if __name__ == "__main__":
                 monitor_gym=True,
                 sync_tensorboard=True, save_code=True)
     algo = os.path.basename(__file__).split(".")[0]
-    args.log_dir = os.path.join(args.log_dir, args.experiment if run.sweep_id is None else run.sweep_id, args.task, algo, run.name)
+    args.log_dir = os.path.join(args.log_dir, args.experiment if run.sweep_id is None else run.sweep_id, args.task, algo, "test")
     if not args.write_terminal:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"

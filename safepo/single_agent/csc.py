@@ -39,6 +39,7 @@ from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic, ActorVQCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
+from safepo.common.lagrange import PIDLagrangian as Lagrange
 
 from copy import deepcopy
 
@@ -248,6 +249,14 @@ def main(args, cfg_env=None):
         num_envs=args.num_envs,
         gamma=config["gamma"],
     )
+    # setup lagrangian multiplier
+    lagrange = Lagrange(
+        cost_limit=args.cost_limit,
+        lagrangian_multiplier_init=args.lagrangian_multiplier_init,
+        pid_kd=args.pid_kd,
+        pid_ki=args.pid_ki,
+        pid_kp=args.pid_kp,
+    )
     loss_fn = torch.nn.SmoothL1Loss()
     # set up the logger
     dict_args = vars(args)
@@ -272,13 +281,16 @@ def main(args, cfg_env=None):
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
     )
+
+    chi = args.csc_chi
+    csc_eps = chi
     # training loop
     for epoch in range(epochs):
         rollout_start_time = time.time()
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
             with torch.no_grad():
-                act, log_prob, value_r, value_c = policy.step(obs, deterministic=False, eps=0.6)
+                act, log_prob, value_r, value_c = policy.step(obs, deterministic=False, eps=csc_eps)
             # print(value_c)
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
@@ -325,12 +337,12 @@ def main(args, cfg_env=None):
                         if epoch_end:
                             with torch.no_grad():
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    obs[idx], deterministic=False
+                                    obs[idx], deterministic=False, eps=csc_eps
                                 )
                         if time_out:
                             with torch.no_grad():
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    info["final_observation"][idx], deterministic=False
+                                    info["final_observation"][idx], deterministic=False, eps=csc_eps
                                 )
                         # last_value_r = last_value_r.unsqueeze(0)
                         # last_value_c = last_value_c.unsqueeze(0)
@@ -389,9 +401,13 @@ def main(args, cfg_env=None):
 
         eval_end_time = time.time()
 
+
         # update lagrange multiplier
         ep_costs = logger.get_stats("Metrics/EpCost")
+        lagrange.update_lagrange_multiplier(ep_costs)
 
+        # csc_eps = (1 - config["gamma"]) * (chi - ep_costs)
+        logger.store(**{"Misc/eps": csc_eps})
         # update policy
         data = buffer.get()
         fvp_obs = data["obs"][:: 1]
@@ -399,7 +415,8 @@ def main(args, cfg_env=None):
         policy.actor.zero_grad()
 
         # comnpute advantage
-        advantage = data["adv_r"]
+        advantage = data["adv_r"] - lagrange.lagrangian_multiplier * data["adv_c"]
+        advantage /= (lagrange.lagrangian_multiplier + 1)
 
         # compute loss_pi
         temp_distribution = policy.actor(data["obs"])
@@ -565,6 +582,7 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/gradient_norm")
             logger.log_tabular("Misc/H_inv_g")
             logger.log_tabular("Misc/AcceptanceStep")
+            logger.log_tabular("Misc/eps")
 
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:

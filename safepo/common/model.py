@@ -338,7 +338,7 @@ class ActorVQCritic(nn.Module):
             # print(obs_rep.size(), action.size())
             qcs = self.cost_critic(torch.cat([obs_rep, action.squeeze()], axis=-1))
             safe = (qcs <= eps)
-            a = action[safe][0] if torch.any(safe) else acts[torch.argmin(qcs)]
+            a = action[safe][0] if torch.any(safe) else action[torch.argmin(qcs)]
             log_prob = dist.log_prob(a).sum(axis=-1)
             action_final[i] = a 
             log_prob_final[i] = log_prob

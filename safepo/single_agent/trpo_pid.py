@@ -462,6 +462,8 @@ def main(args, cfg_env=None):
         policy.actor.zero_grad()
 
         # comnpute advantage
+        data["adv_r"] = (data["adv_r"] - data["adv_r"].mean()) / data["adv_r"].std()
+        data["adv_c"] = (data["adv_c"] - data["adv_c"].mean()) / data["adv_c"].std()
         advantage = data["adv_r"] - lagrange.lagrangian_multiplier * data["adv_c"]
         advantage /= (lagrange.lagrangian_multiplier + 1)
 

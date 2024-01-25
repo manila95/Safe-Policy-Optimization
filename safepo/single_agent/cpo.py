@@ -501,7 +501,10 @@ def main(args, cfg_env=None):
         loss_pi_c.backward()
 
         b_grads = get_flat_gradients_from(policy.actor)
+        args.cost_limit = args.min_limit + (1 - epoch / epochs) * (args.max_limit - args.min_limit)
         ep_costs = logger.get_stats("Metrics/EpCost") - args.cost_limit
+        logger.store(**{"Misc/cost-limit": args.cost_limit})
+        #args.cost_limit = args.min_limit + (1 - epoch / epochs) * (args.max_limit - args.min_limit)
 
         p = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, b_grads, CONJUGATE_GRADIENT_ITERS)
         q = xHx
@@ -602,7 +605,7 @@ def main(args, cfg_env=None):
                     ratio = torch.exp(log_prob - data["log_prob"])
                     loss_reward = -(ratio * data["adv_r"]).mean()
                 except ValueError:
-                    step_frac *= STEP_FRACTION
+                    step_frac *= args.cpo_step_fraction #STEP_FRACTION
                     continue
                 temp_distribution = policy.actor(data["obs"], data["risk"])
                 log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
@@ -632,7 +635,7 @@ def main(args, cfg_env=None):
             else:
                 logger.log(f"Accept step at i={step + 1}")
                 break
-            step_frac *= STEP_FRACTION
+            step_frac *= args.cpo_step_fraction #STEP_FRACTION
         else:
             logger.log("INFO: no suitable step found...")
             step_direction = torch.zeros_like(step_direction)
@@ -732,6 +735,8 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/gradient_norm")
             logger.log_tabular("Misc/H_inv_g")
             logger.log_tabular("Misc/AcceptanceStep")
+            logger.log_tabular("Misc/cost-limit")
+
             if args.use_risk and args.fine_tune_risk:
                 #try:
                 logger.log_tabular("risk/risk_loss")
@@ -767,7 +772,7 @@ if __name__ == "__main__":
         os.makedirs(os.path.join("/logs", args.experiment))
     except:
         pass
-    run = wandb.init(config=vars(args), entity="kaustubh_umontreal",
+    run = wandb.init(config=vars(args), entity="manila95",
                 project="risk_aware_exploration",
                 monitor_gym=True,
                 dir=os.path.join("/logs",args.experiment),

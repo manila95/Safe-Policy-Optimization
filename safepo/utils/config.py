@@ -182,13 +182,15 @@ def single_agent_args():
         {"name": "--steps-per-epoch", "type": int, "default": 20000, "help": "The number of steps to run in each environment per policy rollout"},
         {"name": "--randomize", "type": bool, "default": False, "help": "Wheather to randomize the environments' initial states"},
         {"name": "--cost-limit", "type": float, "default": 25.0, "help": "cost_lim"},
+        {"name": "--max-limit", "type": float, "default": 1.0, "help": "cost_lim"},
+        {"name": "--min-limit", "type": float, "default": 0.1, "help": "cost_lim"},
         {"name": "--target-kl", "type": float, "default": 0.01, "help": "target kl for cpo"},
         {"name": "--lagrangian-multiplier-init", "type": float, "default": 0.001, "help": "initial value of lagrangian multiplier"},
         {"name": "--lagrangian-multiplier-lr", "type": float, "default": 0.035, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-kp", "type": float, "default": 0.1, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-ki", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-kd", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
-
+        {"name": "--cpo-step-fraction", "type": float, "default": 0.8, "help": "learning rate of lagrangian multiplier"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

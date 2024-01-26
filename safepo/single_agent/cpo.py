@@ -501,7 +501,7 @@ def main(args, cfg_env=None):
         loss_pi_c.backward()
 
         b_grads = get_flat_gradients_from(policy.actor)
-        args.cost_limit = args.min_limit + (1 - epoch / epochs) * (args.max_limit - args.min_limit)
+        #args.cost_limit = args.min_limit + (1 - epoch / epochs) * (args.max_limit - args.min_limit)
         ep_costs = logger.get_stats("Metrics/EpCost") - args.cost_limit
         logger.store(**{"Misc/cost-limit": args.cost_limit})
         #args.cost_limit = args.min_limit + (1 - epoch / epochs) * (args.max_limit - args.min_limit)

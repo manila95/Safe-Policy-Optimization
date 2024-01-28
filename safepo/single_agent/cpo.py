@@ -320,7 +320,7 @@ def main(args, cfg_env=None):
                     f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
             if args.use_risk and args.fine_tune_risk:
-                if epoch > args.start_risk_update and global_step % args.risk_update_period == 0:
+                if len(rb) > args.risk_batch_size and global_step % args.risk_update_period == 0:
                     # for _ in range(args.num_risk_epochs):
                     risk_data = rb.sample(args.risk_batch_size)
                     risk_loss = risk_update_step(risk_model, risk_data, risk_criterion, opt_risk, device)
@@ -397,7 +397,7 @@ def main(args, cfg_env=None):
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
-                        goal_deque.append(info["final_info"][idx]["cum_goal_met"])
+                        #goal_deque.append(info["final_info"][idx]["cum_goal_met"])
                         total_cost += ep_cost[idx]
                         logger.store(
                             **{
@@ -446,7 +446,7 @@ def main(args, cfg_env=None):
                 eval_rew_deque.append(eval_rew)
                 eval_cost_deque.append(eval_cost)
                 eval_len_deque.append(eval_len)
-                eval_goal_deque.append(info["final_info"][idx]["cum_goal_met"])
+                #eval_goal_deque.append(info["final_info"][idx]["cum_goal_met"])
 
             logger.store(
                 **{
@@ -772,7 +772,7 @@ if __name__ == "__main__":
         os.makedirs(os.path.join("/logs", args.experiment))
     except:
         pass
-    run = wandb.init(config=vars(args), entity="manila95",
+    run = wandb.init(config=vars(args), entity="kaustubh_umontreal",
                 project="risk_aware_exploration",
                 monitor_gym=True,
                 dir=os.path.join("/logs",args.experiment),

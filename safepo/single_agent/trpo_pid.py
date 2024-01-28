@@ -222,14 +222,15 @@ def main(args, cfg_env=None):
     if args.use_risk:
         risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
                     "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
-
-        risk_model = BayesRiskEst(obs_size=obs_space.shape[0], batch_norm=True, out_size=risk_size)
+         
+        risk_input_shape = obs_space.shape[0]+act_space.shape[0] if args.risk_input == "state_action" else obs_space.shape[0]
+        risk_model = BayesRiskEst(obs_size=risk_input_shape, batch_norm=True, out_size=risk_size)
         if os.path.exists(args.risk_model_path):
-            risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
+            risk_model.load_state_dict(torch.load(args.risk_model_path)) #, map_location=device))
+            print("Pretrained Risk model loaded successfully")
 
         risk_model.to(device)
         risk_model.eval()
-
         opt_risk = torch.optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-10)
 
         if args.fine_tune_risk:
@@ -320,6 +321,7 @@ def main(args, cfg_env=None):
                     f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
             if args.use_risk and args.fine_tune_risk:
+                # print(len(rb))
                 if len(rb) > args.risk_batch_size and global_step % args.risk_update_period == 0:
                     # for _ in range(args.num_risk_epochs):
                     risk_data = rb.sample(args.risk_batch_size)
@@ -346,9 +348,14 @@ def main(args, cfg_env=None):
                         f_risks[:, i] = compute_fear(f_costs[:, i])
                     f_risks = f_risks.view(-1, 1)
                     e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, f_risks.cpu().numpy())).to(device)
-                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, e_risks_quant, f_risks)
+                    rb.add(None, f_next_obs.view(-1, risk_input_shape), None, None, None, None, e_risks_quant, f_risks)
+
                     f_next_obs, f_costs = None, None
-                final_risk = risk_model(info["final_observation"]) if args.use_risk else None
+
+                if args.use_risk:
+                    final_risk = torch.exp(risk_model(torch.cat([info["final_observation"], torch.zeros(args.num_envs, act_space.shape[0])], axis=-1))) if args.risk_input == "state_action" else torch.exp(risk_model(info["final_observation"]))
+                else:
+                    final_risk = None
             global_step += args.num_envs
 
             buffer.store(
@@ -362,7 +369,14 @@ def main(args, cfg_env=None):
             )
 
             obs = next_obs
-            risk = risk_model(obs) if args.use_risk else None
+            if args.use_risk:
+                if epoch < args.start_using_risk:
+                    risk = torch.zeros((obs.size()[0], risk_size))
+                else:
+                    risk = torch.exp(risk_model(torch.cat([obs, torch.zeros(args.num_envs, act_space.shape[0])], axis=-1))) if args.risk_input == "state_action" else torch.exp(risk_model(obs))
+            else:
+                risk = None
+    
             epoch_end = steps >= local_steps_per_epoch - 1
             for idx, (done, time_out) in enumerate(zip(terminated, truncated)):
                 if epoch_end or done or time_out:
@@ -387,7 +401,7 @@ def main(args, cfg_env=None):
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
-                        goal_deque.append(info["final_info"][idx]["cum_goal_met"])
+                        # goal_deque.append(info["final_info"][idx]["cum_goal_met"])
                         total_cost += ep_cost[idx]
                         logger.store(
                             **{
@@ -396,6 +410,7 @@ def main(args, cfg_env=None):
                                 "Metrics/EpLen": np.mean(len_deque),
                                 "Metrics/EpGoal": np.mean(goal_deque),
                                 "Metrics/TotalCost": total_cost,
+                                "Metrics/ViolationRate": np.mean(np.array(list(cost_deque)) > args.cost_limit)
                             }
                         )
                         ep_ret[idx] = 0.0
@@ -434,7 +449,7 @@ def main(args, cfg_env=None):
                 eval_rew_deque.append(eval_rew)
                 eval_cost_deque.append(eval_cost)
                 eval_len_deque.append(eval_len)
-                eval_goal_deque.append(info["final_info"][idx]["cum_goal_met"])
+                # eval_goal_deque.append(info["final_info"][idx]["cum_goal_met"])
                 eval_total_cost += eval_cost
             logger.store(
                 **{
@@ -455,14 +470,20 @@ def main(args, cfg_env=None):
         # update policy
         data = buffer.get()
         with torch.no_grad():
-            data["risk"] = risk_model(data["obs"]) if args.use_risk else None
+            if args.use_risk:
+                if epoch < args.start_using_risk:
+                    data["risk"] = torch.zeros((data["act"].size()[0], risk_size))
+                else:
+                    data["risk"] = torch.exp(risk_model(torch.cat([data["obs"], torch.zeros_like(data["act"])], axis=-1))) if args.risk_input == "state_action" else torch.exp(risk_model(data["obs"]))
+            else:
+                data["risk"] = None 
         fvp_obs = data["obs"][:: 1]
         fvp_risk = data["risk"][:: 1] if args.use_risk else None
         theta_old = get_flat_params_from(policy.actor)
         policy.actor.zero_grad()
 
         # comnpute advantage
-        advantage = data["adv_r"] - lagrange.lagrangian_multiplier * data["adv_c"]
+        advantage = data["adv_r"] - lagrange.lagrangian_multiplier * data["adv_c"]  
         advantage /= (lagrange.lagrangian_multiplier + 1)
 
         # compute loss_pi
@@ -606,7 +627,9 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpCost")
             logger.log_tabular("Metrics/TotalCost")
             logger.log_tabular("Metrics/EpLen")
-            logger.log_tabular("Metrics/EpGoal")
+            # logger.log_tabular("Metrics/EpGoal")
+            logger.log_tabular("Metrics/ViolationRate")
+
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")
@@ -668,7 +691,7 @@ if __name__ == "__main__":
         os.makedirs(os.path.join("/logs", args.experiment))
     except:
         pass
-    run = wandb.init(config=vars(args), entity="manila95",
+    run = wandb.init(config=vars(args), entity="kaustubh_umontreal",
                 project="risk_aware_exploration",
                 monitor_gym=True,
                 dir=os.path.join("/logs",args.experiment),

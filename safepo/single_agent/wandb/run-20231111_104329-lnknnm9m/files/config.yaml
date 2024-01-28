@@ -1,0 +1,116 @@
+wandb_version: 1
+
+seed:
+  desc: null
+  value: 0
+use_eval:
+  desc: null
+  value: false
+task:
+  desc: null
+  value: SafetyCarButton2-v0
+num_envs:
+  desc: null
+  value: 10
+experiment:
+  desc: null
+  value: single_agent_exp
+log_dir:
+  desc: null
+  value: ../runs/single_agent_exp/SafetyCarButton2-v0/ppo_lag/seed-000-2023-11-11-10-43-28
+device:
+  desc: null
+  value: cpu
+device_id:
+  desc: null
+  value: 0
+write_terminal:
+  desc: null
+  value: true
+headless:
+  desc: null
+  value: false
+use_risk:
+  desc: null
+  value: false
+fine_tune_risk:
+  desc: null
+  value: false
+risk_model_path:
+  desc: null
+  value: None
+quantile_num:
+  desc: null
+  value: 10
+quantile_size:
+  desc: null
+  value: 4
+fear_radius:
+  desc: null
+  value: 5
+risk_type:
+  desc: null
+  value: quantile
+risk_lr:
+  desc: null
+  value: 1.0e-05
+risk_batch_size:
+  desc: null
+  value: 5000
+num_risk_epochs:
+  desc: null
+  value: 10
+risk_weight:
+  desc: null
+  value: 1.0
+num_risk_samples:
+  desc: null
+  value: 30000
+total_steps:
+  desc: null
+  value: 10000000
+steps_per_epoch:
+  desc: null
+  value: 20000
+randomize:
+  desc: null
+  value: false
+cost_limit:
+  desc: null
+  value: 25.0
+lagrangian_multiplier_init:
+  desc: null
+  value: 0.001
+lagrangian_multiplier_lr:
+  desc: null
+  value: 0.035
+_wandb:
+  desc: null
+  value:
+    code_path: code/safepo/single_agent/ppo_lag.py
+    python_version: 3.9.18
+    cli_version: 0.14.2
+    framework: torch
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1699717409.826979
+    t:
+      1:
+      - 1
+      - 5
+      - 53
+      - 55
+      2:
+      - 1
+      - 5
+      - 53
+      - 55
+      3:
+      - 16
+      - 23
+      - 35
+      4: 3.9.18
+      5: 0.14.2
+      8:
+      - 4
+      - 5

@@ -1,0 +1,32 @@
+diff --git a/safepo/single_agent/ppo_lag.py b/safepo/single_agent/ppo_lag.py
+index 284b9a1..b6eae13 100644
+--- a/safepo/single_agent/ppo_lag.py
++++ b/safepo/single_agent/ppo_lag.py
+@@ -28,6 +28,7 @@ try:
+ except ImportError:
+     pass
+ import torch
++import wandb
+ import torch.nn as nn
+ import torch.optim
+ from torch.nn.utils.clip_grad import clip_grad_norm_
+@@ -67,6 +68,7 @@ isaac_gym_specific_cfg = {
+     'use_critic_norm': False,
+ }
+ 
++
+ def main(args, cfg_env=None):
+     # set the random seed, device and number of threads
+     random.seed(args.seed)
+@@ -75,6 +77,11 @@ def main(args, cfg_env=None):
+     torch.backends.cudnn.deterministic = True
+     torch.set_num_threads(4)
+     device = torch.device(f'{args.device}:{args.device_id}')
++    run = wandb.init(config=vars(args), entity="kaustubh95",
++                project="risk_aware_exploration",
++                monitor_gym=True,
++                sync_tensorboard=True, save_code=True)
++
+ 
+     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
+     if args.task not in isaac_gym_map.keys():

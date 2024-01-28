@@ -1,0 +1,83 @@
+diff --git a/safepo/single_agent/ppo_lag.py b/safepo/single_agent/ppo_lag.py
+index 284b9a1..9707dce 100644
+--- a/safepo/single_agent/ppo_lag.py
++++ b/safepo/single_agent/ppo_lag.py
+@@ -28,6 +28,7 @@ try:
+ except ImportError:
+     pass
+ import torch
++import wandb
+ import torch.nn as nn
+ import torch.optim
+ from torch.nn.utils.clip_grad import clip_grad_norm_
+@@ -67,6 +68,7 @@ isaac_gym_specific_cfg = {
+     'use_critic_norm': False,
+ }
+ 
++
+ def main(args, cfg_env=None):
+     # set the random seed, device and number of threads
+     random.seed(args.seed)
+@@ -75,6 +77,11 @@ def main(args, cfg_env=None):
+     torch.backends.cudnn.deterministic = True
+     torch.set_num_threads(4)
+     device = torch.device(f'{args.device}:{args.device_id}')
++    run = wandb.init(config=vars(args), entity="kaustubh95",
++                project="risk_aware_exploration",
++                monitor_gym=True,
++                sync_tensorboard=True, save_code=True)
++
+ 
+     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
+     if args.task not in isaac_gym_map.keys():
+@@ -185,6 +192,7 @@ def main(args, cfg_env=None):
+         np.zeros(args.num_envs),
+     )
+     f_next_obs, f_costs = None, None
++    total_cost, eval_total_cost = 0, 0
+     # training loop
+     for epoch in range(epochs):
+         rollout_start_time = time.time()
+@@ -278,10 +286,12 @@ def main(args, cfg_env=None):
+                         rew_deque.append(ep_ret[idx])
+                         cost_deque.append(ep_cost[idx])
+                         len_deque.append(ep_len[idx])
++                        total_cost += ep_cost[idx]
+                         logger.store(
+                             **{
+                                 "Metrics/EpRet": np.mean(rew_deque),
+                                 "Metrics/EpCost": np.mean(cost_deque),
++                                "Metrics/TotalCost": total_cost,
+                                 "Metrics/EpLen": np.mean(len_deque),
+                             }
+                         )
+@@ -324,11 +334,13 @@ def main(args, cfg_env=None):
+                 eval_rew_deque.append(eval_rew)
+                 eval_cost_deque.append(eval_cost)
+                 eval_len_deque.append(eval_len)
++                eval_total_cost += eval_cost
+             logger.store(
+                 **{
+                     "Metrics/EvalEpRet": np.mean(eval_rew),
+                     "Metrics/EvalEpCost": np.mean(eval_cost),
+                     "Metrics/EvalEpLen": np.mean(eval_len),
++                    "Metrics/EvalTotalCost": eval_total_cost,
+                 }
+             )
+ 
+@@ -448,11 +460,14 @@ def main(args, cfg_env=None):
+             # log data
+             logger.log_tabular("Metrics/EpRet")
+             logger.log_tabular("Metrics/EpCost")
++            logger.log_tabular("Metrics/TotalCost")
+             logger.log_tabular("Metrics/EpLen")
+             if args.use_eval:
+                 logger.log_tabular("Metrics/EvalEpRet")
+-                logger.log_tabular("Metrics/EvalEpCost")
++                logger.log_tabular("Metrics/EvalTotalCost")
+                 logger.log_tabular("Metrics/EvalEpLen")
++                logger.log_tabular("Metrics/EvalEpCost")
++
+             logger.log_tabular("Train/Epoch", epoch + 1)
+             logger.log_tabular("Train/TotalSteps", (epoch + 1) * args.steps_per_epoch)
+             logger.log_tabular("Train/StopIter", update_counts)

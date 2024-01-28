@@ -1,0 +1,43 @@
+{
+    "os": "macOS-13.4.1-arm64-arm-64bit",
+    "python": "3.9.18",
+    "heartbeatAt": "2023-11-11T06:39:50.854068",
+    "startedAt": "2023-11-11T06:39:49.754340",
+    "docker": null,
+    "cuda": null,
+    "args": [
+        "--task",
+        "SafetyPointGoal1-v0",
+        "--seed",
+        "0",
+        "--use-risk",
+        "True",
+        "--fine-tune-risk",
+        "True"
+    ],
+    "state": "running",
+    "program": "/Users/kaustubhmani/git/risk_aware_exploration/pkgs/Safe-Policy-Optimization/safepo/single_agent/ppo_lag.py",
+    "codePath": "safepo/single_agent/ppo_lag.py",
+    "git": {
+        "remote": "git@github.com:manila95/Safe-Policy-Optimization.git",
+        "commit": "79284d189854675d23af203796ecfb3aac3d4d2d"
+    },
+    "email": "kaustubh3095@gmail.com",
+    "root": "/Users/kaustubhmani/git/risk_aware_exploration/pkgs/Safe-Policy-Optimization",
+    "host": "Kaustubhs-Air.hitronhub.home",
+    "username": "kaustubhmani",
+    "executable": "/Users/kaustubhmani/anaconda3/envs/fsrl/bin/python",
+    "cpu_count": 8,
+    "cpu_count_logical": 8,
+    "disk": {
+        "total": 228.27386474609375,
+        "used": 8.437652587890625
+    },
+    "gpuapple": {
+        "type": "arm",
+        "vendor": "Apple"
+    },
+    "memory": {
+        "total": 8.0
+    }
+}

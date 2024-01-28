@@ -265,7 +265,7 @@ class ActorVCritic(nn.Module):
 
 
 
-class ActorVQCritic(nn.Module):
+class ActorVCritic2(nn.Module):
     """
     Actor-critic policy for reinforcement learning.
 
@@ -291,7 +291,7 @@ class ActorVQCritic(nn.Module):
         self.num_envs = num_envs
         self.act_dim = act_dim
         self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
-        self.cost_critic = QCritic(obs_dim, act_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+        self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
         self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
 
     def get_value(self, obs, risk=None):
@@ -309,7 +309,7 @@ class ActorVQCritic(nn.Module):
         else:
             return self.critic(obs)
 
-    def step(self, obs_org, risk=None, deterministic=False, eps=0.6):
+    def step(self, obs_org, risk=None, deterministic=False, csc_critic=None, eps=0.6):
         """
         Take a policy step based on observations.
 
@@ -321,36 +321,54 @@ class ActorVQCritic(nn.Module):
             tuple: Tuple containing action tensor, log probabilities of the action, reward value estimate,
                    and cost value estimate.
         """
-        obs_org = obs_org.unsqueeze(0) if len(obs_org.size()) < 2 else obs_org
-        action_final = torch.zeros((obs_org.size()[0], self.act_dim))
-        log_prob_final = torch.zeros((obs_org.size()[0], 1))
-        # print(obs_org.size())
-        for i in range(obs_org.size()[0]):
-            if self.use_risk:
-                dist = self.actor(obs_org[i], risk)
-            else:
-                dist = self.actor(obs_org[i].unsqueeze(0))
-            if deterministic:
-                action = dist.mean
-            else:
-                action = dist.sample_n(100)
-            obs_rep = obs_org[i].unsqueeze(0).repeat(100, 1)
-            # print(obs_rep.size(), action.size())
-            qcs = self.cost_critic(torch.cat([obs_rep, action.squeeze()], axis=-1))
-            safe = (qcs <= eps)
-            a = action[safe][0] if torch.any(safe) else action[torch.argmin(qcs)]
-            log_prob = dist.log_prob(a).sum(axis=-1)
-            action_final[i] = a 
-            log_prob_final[i] = log_prob
+        # obs_org = obs_org.unsqueeze(0) if len(obs_org.size()) < 2 else obs_org
+        # action_final = torch.zeros((obs_org.size()[0], self.act_dim))
+        # log_prob_final = torch.zeros((obs_org.size()[0], 1))
+        # # print(obs_org.size())
+        # for i in range(obs_org.size()[0]):
+        #     if self.use_risk:
+        #         dist = self.actor(obs_org[i], risk)
+        #     else:
+        #         dist = self.actor(obs_org[i].unsqueeze(0))
+        #     if deterministic:
+        #         action = dist.mean
+        #     else:
+        #         action = dist.sample_n(100)
+        #     obs_rep = obs_org[i].unsqueeze(0).repeat(100, 1)
+        #     # print(obs_rep.size(), action.size())
+        #     qcs = csc_critic(torch.cat([obs_rep, action.squeeze()], axis=-1))
+        #     safe = (qcs <= eps)
+        #     a = action[safe][0] if torch.any(safe) else action[torch.argmin(qcs)]
+        #     log_prob = dist.log_prob(a).sum(axis=-1)
+        #     action_final[i] = a 
+        #     log_prob_final[i] = log_prob
 
-        obs_act = torch.cat([obs_org, action_final], axis=-1)
+        # if self.use_risk:
+        #     value_r = self.reward_critic(obs_org, risk)
+        #     value_c = self.cost_critic(obs_org, risk)
+        # else:
+        #     value_r = self.reward_critic(obs_org)
+        #     value_c = self.cost_critic(obs_org)
+        # return action_final, log_prob_final, value_r, value_c
+        obs = obs_org
         if self.use_risk:
-            value_r = self.reward_critic(obs_org, risk)
-            value_c = self.cost_critic(obs_act, risk)
+            dist = self.actor(obs, risk)
         else:
-            value_r = self.reward_critic(obs_org)
-            value_c = self.cost_critic(obs_act)
-        return action_final, log_prob_final, value_r, value_c
+            dist = self.actor(obs)
+        if deterministic:
+            action = dist.mean
+        else:
+            action = dist.rsample()
+        log_prob = dist.log_prob(action).sum(axis=-1)
+        if self.use_risk:
+            value_r = self.reward_critic(obs, risk)
+            value_c = self.cost_critic(obs, risk)
+        else:
+            value_r = self.reward_critic(obs)
+            value_c = self.cost_critic(obs)
+        return action, log_prob, value_r, value_c
+
+
 
 
 class MultiAgentActor(nn.Module):

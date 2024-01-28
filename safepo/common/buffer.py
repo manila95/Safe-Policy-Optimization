@@ -63,6 +63,7 @@ class VectorizedOnPolicyBuffer:
                 ),
                 "reward": torch.zeros(size, dtype=torch.float32, device=device),
                 "cost": torch.zeros(size, dtype=torch.float32, device=device),
+                "failure": torch.zeros(size, dtype=torch.float32, device=device),
                 "done": torch.zeros(size, dtype=torch.float32, device=device),
                 "value_r": torch.zeros(size, dtype=torch.float32, device=device),
                 "value_c": torch.zeros(size, dtype=torch.float32, device=device),

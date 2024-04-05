@@ -333,6 +333,11 @@ def main(args, cfg_env=None):
                                 "Metrics/EpLen": np.mean(len_deque),
                             }
                         )
+                        wandb.log({
+                                "Metrics/EpRet": np.mean(rew_deque),
+                                "Metrics/EpCost": np.mean(cost_deque),
+                                "Metrics/EpLen": np.mean(len_deque),
+                            })
                         ep_ret[idx] = 0.0
                         ep_cost[idx] = 0.0
                         ep_len[idx] = 0.0
@@ -381,6 +386,7 @@ def main(args, cfg_env=None):
         if args.use_risk and args.fine_tune_risk:
             risk_loss = risk_train.train()
             logger.store(**{"risk/risk_loss": risk_loss})
+            wandb.log({"risk/risk_loss": risk_loss})
 
         # update policy
         data = buffer.get()
@@ -613,6 +619,14 @@ def main(args, cfg_env=None):
                     }
                 )
         update_end_time = time.time()
+
+        wandb.log({"Train/TotalSteps": (epoch + 1) * args.steps_per_epoch, "Train/Epoch": epoch + 1})
+        torch.save(policy.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
+        wandb.save(os.path.join(wandb.run.dir, "policy.pt"))
+        if args.use_risk:
+            print("Saving risk model")
+            torch.save(risk_train.model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
+            wandb.save(os.path.join(wandb.run.dir, "risk_model.pt"))
         if not logger.logged:
             # log data
             logger.log_tabular("Metrics/EpRet")

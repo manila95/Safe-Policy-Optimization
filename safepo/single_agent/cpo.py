@@ -677,6 +677,7 @@ if __name__ == "__main__":
     run = wandb.init(config=vars(args), entity="kaustubh_umontreal",
                 project="risk_aware_exploration",
                 monitor_gym=True,
+                dir=os.path.join(args.log_dir, args.experiment),
                 sync_tensorboard=True, save_code=True)
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])

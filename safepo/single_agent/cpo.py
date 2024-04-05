@@ -683,7 +683,7 @@ if __name__ == "__main__":
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])
     algo = os.path.basename(__file__).split(".")[0]
-    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, run.name)
+    args.log_dir = os.path.join(args.log_dir, args.experiment, args.task, algo, relpath)
     if not args.write_terminal:
         terminal_log_name = "terminal.log"
         error_log_name = "error.log"

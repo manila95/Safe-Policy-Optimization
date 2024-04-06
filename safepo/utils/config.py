@@ -148,7 +148,7 @@ def single_agent_args():
         {"name": "--task", "type": str, "default": "SafetyPointGoal1-v0", "help": "The task to run"},
         {"name": "--num-envs", "type": int, "default": 10, "help": "The number of parallel game environments"},
         {"name": "--experiment", "type": str, "default": "single_agent_exp", "help": "Experiment name"},
-        {"name": "--log-dir", "type": str, "default": "../runs", "help": "directory to save agent logs"},
+        {"name": "--log-dir", "type": str, "default": "./runs", "help": "directory to save agent logs"},
         {"name": "--device", "type": str, "default": "cpu", "help": "The device to run the model on"},
         {"name": "--device-id", "type": int, "default": 0, "help": "The device id to run the model on"},
         {"name": "--write-terminal", "type": lambda x: bool(strtobool(x)), "default": True, "help": "Toggles terminal logging"},

@@ -172,8 +172,8 @@ def main(args, cfg_env=None):
     device = torch.device(f'{args.device}:{args.device_id}')
 
     import wandb
-    wandb.login(key="7fd30ee0915aa367ca41345b56bd4fba756ca55a")
-    run = wandb.init(config=vars(args), entity="kaustubh95",
+    #wandb.login(key="7fd30ee0915aa367ca41345b56bd4fba756ca55a")
+    run = wandb.init(config=vars(args), entity="kaustubh_umontreal",
                 project="risk_aware_exploration",
                 monitor_gym=True,
                 sync_tensorboard=True, save_code=True)

@@ -171,6 +171,7 @@ def single_agent_args():
         {"name": "--cost-limit", "type": float, "default": 25.0, "help": "cost_lim"},
         {"name": "--lagrangian-multiplier-init", "type": float, "default": 0.001, "help": "initial value of lagrangian multiplier"},
         {"name": "--lagrangian-multiplier-lr", "type": float, "default": 0.035, "help": "learning rate of lagrangian multiplier"},
+        {"name": "--risk-update-period", "type": int, "default": 10, "help": "Fear radius for binary classifier risk"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

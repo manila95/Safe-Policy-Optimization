@@ -275,6 +275,11 @@ def main(args, cfg_env=None):
     total_cost, eval_total_cost = 0, 0
     f_next_obs, f_costs = None, None
 
+    risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])
+    global_step = 0
+
+
+    logger.store(**{"risk/risk_loss": 0})
     # training loop
     for epoch in range(epochs):
         rollout_start_time = time.time()
@@ -294,9 +299,22 @@ def main(args, cfg_env=None):
                 for x in (next_obs, reward, cost, terminated, truncated)
             )
             if args.use_risk and args.fine_tune_risk:
-                f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
-                f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
+                f_next_obs = next_obs.unsqueeze(0).to("cpu") if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0).to("cpu")], axis=0)
+                f_costs = cost.unsqueeze(0).to("cpu") if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0).to("cpu")], axis=0)
             # print(info)
+
+
+            if args.use_risk and args.fine_tune_risk and len(rb) > 0 and global_step % args.risk_update_period == 0:
+                    risk_data = rb.sample(args.risk_batch_size)
+                    pred = risk_model(risk_data["next_obs"].to(device))
+                    risk_loss = risk_criterion(pred, torch.argmax(risk_data["risks"].squeeze(), axis=1).to(device))
+                    opt_risk.zero_grad()
+                    risk_loss.backward()
+                    opt_risk.step()
+                    logger.store(**{"risk/risk_loss": risk_loss.item()})
+                #writer.add_scalar("risk/risk_loss", risk_loss, global_step)
+
+            global_step += args.num_envs 
             if "final_observation" in info:
                 info["final_observation"] = np.array(
                     [
@@ -313,7 +331,10 @@ def main(args, cfg_env=None):
                     f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
                         f_risks[:, i] = compute_fear(f_costs[:, i])
-                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, f_risks.view(-1, 1), f_risks.view(-1, 1))
+
+                    f_risks = f_risks.view(-1, 1)
+                    f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks.cpu().numpy(), 1)))
+                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, f_risks_quant, f_risks)
 
                     f_next_obs, f_costs = None, None
 
@@ -362,6 +383,8 @@ def main(args, cfg_env=None):
                                 "Metrics/EpCost": np.mean(cost_deque),
                                 "Metrics/EpLen": np.mean(len_deque),
                                 "Metrics/TotalCost": total_cost,
+                                "Metrics/ViolationRate": np.mean(np.array(cost_deque) > args.cost_limit),
+                                "Metrics/TotalViolation": np.sum(np.array(cost_deque) > args.cost_limit),
                             }
                         )
                         ep_ret[idx] = 0.0
@@ -412,9 +435,9 @@ def main(args, cfg_env=None):
         eval_end_time = time.time()
 
         ## Risk Fine Tuning before the policy is updated
-        if args.use_risk and args.fine_tune_risk:
+        if False: #args.use_risk and args.fine_tune_risk:
             risk_data = rb.sample(args.num_risk_samples)
-            risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["risks"].to('cpu'), False, risk_type=args.risk_type,
+            risk_dataset = RiskyDataset(risk_data["next_obs"].to('cpu'), None, risk_data["dist_to_fail"].to('cpu'), False, risk_type=args.risk_type,
                                     fear_clip=None, fear_radius=args.fear_radius, one_hot=True, quantile_size=args.quantile_size, quantile_num=args.quantile_num)
             risk_dataloader = DataLoader(risk_dataset, batch_size=args.risk_batch_size, shuffle=True)
 
@@ -683,7 +706,10 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/gradient_norm")
             logger.log_tabular("Misc/H_inv_g")
             logger.log_tabular("Misc/AcceptanceStep")
-
+            logger.log_tabular("Metrics/ViolationRate")
+            logger.log_tabular("Metrics/TotalViolation")
+            if args.use_risk:
+                logger.log_tabular("risk/risk_loss")
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)
@@ -694,6 +720,14 @@ def main(args, cfg_env=None):
                         },
                         itr = epoch
                     )
+
+    ## Save Policy 
+    torch.save(policy.state_dict(), os.path.join(args.log_dir, "policy.pt"))
+    wandb.save(os.path.join(args.log_dir, "policy.pt"))
+    if args.use_risk:
+        torch.save(risk_model.state_dict(), os.path.join(args.log_dir, "risk_model.pt"))
+        wandb.save(os.path.join(args.log_dir, "risk_model.pt"))
+
         ## Garbage Collection 
         data, dataloader = None, None
     logger.close()

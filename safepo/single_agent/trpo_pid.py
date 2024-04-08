@@ -342,8 +342,9 @@ def main(args, cfg_env=None):
                     for i in range(args.num_envs):
                         f_risks[:, i] = compute_fear(f_costs[:, i])
                     f_risks = f_risks.view(-1, 1)
-                    e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, f_risks.cpu().numpy())).to(device)
-                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, e_risks_quant, f_risks)
+                    f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks.cpu().numpy(), 1)))
+                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, f_risks_quant, f_risks)
+
                     f_next_obs, f_costs = None, None
                 final_risk = risk_model(info["final_observation"]) if args.use_risk else None
 

@@ -35,7 +35,7 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
+from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_gymrobot_env
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
@@ -181,10 +181,10 @@ def main(args, cfg_env=None):
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
 
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
+        env, obs_space, act_space = make_sa_gymrobot_env(
             num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        eval_env, _, _ = make_sa_mujoco_env(num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = make_sa_gymrobot_env(num_envs=1, env_id=args.task, seed=None)
         config = default_cfg
 
     else:
@@ -259,6 +259,7 @@ def main(args, cfg_env=None):
     rew_deque = deque(maxlen=50)
     cost_deque = deque(maxlen=50)
     len_deque = deque(maxlen=50)
+    goal_deque = deque(maxlen=50)
     eval_rew_deque = deque(maxlen=50)
     eval_cost_deque = deque(maxlen=50)
     eval_len_deque = deque(maxlen=50)
@@ -267,17 +268,17 @@ def main(args, cfg_env=None):
     logger.log("Start with training.")
     obs, _ = env.reset()
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
-    ep_ret, ep_cost, ep_len = (
+    ep_ret, ep_cost, ep_len, ep_goal = (
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
+        np.zeros(args.num_envs)
     )
     total_cost, eval_total_cost = 0, 0
     f_next_obs, f_costs = None, None
 
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])
     global_step = 0
-
 
     logger.store(**{"risk/risk_loss": 0})
     # training loop
@@ -289,8 +290,10 @@ def main(args, cfg_env=None):
                 risk = risk_model(obs) if args.use_risk else None 
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
-            next_obs, reward, cost, terminated, truncated, info = env.step(action)
+            next_obs, reward, terminated, truncated, info = env.step(action)
+            cost = info["cost"]
 
+            ep_goal += info["success"]
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
@@ -376,12 +379,14 @@ def main(args, cfg_env=None):
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
+                        goal_deque.append(ep_goal[idx])
                         total_cost += ep_cost[idx]
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),
                                 "Metrics/EpCost": np.mean(cost_deque),
                                 "Metrics/EpLen": np.mean(len_deque),
+                                "Metrics/EpGoal": np.mean(goal_deque),
                                 "Metrics/TotalCost": total_cost,
                                 "Metrics/ViolationRate": np.mean(np.array(cost_deque) > args.cost_limit),
                                 "Metrics/TotalViolation": np.sum(np.array(cost_deque) > args.cost_limit),
@@ -390,6 +395,7 @@ def main(args, cfg_env=None):
                         ep_ret[idx] = 0.0
                         ep_cost[idx] = 0.0
                         ep_len[idx] = 0.0
+                        ep_goal[idx] = 0.0
                         logger.logged = False
 
                     buffer.finish_path(
@@ -680,6 +686,7 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpRet")
             logger.log_tabular("Metrics/EpCost")
             logger.log_tabular("Metrics/EpLen")
+            logger.log_tabular("Metrics/EpGoal")
             logger.log_tabular("Metrics/TotalCost")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")

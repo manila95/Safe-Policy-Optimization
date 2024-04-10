@@ -266,6 +266,9 @@ def main(args, cfg_env=None):
     logger.setup_torch_saver(policy.actor)
     logger.log("Start with training.")
     obs = env.reset()
+    if "fetch" in args.task.lower():
+        obs = obs["observation"]
+
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
     ep_ret, ep_cost, ep_len = (
         np.zeros(args.num_envs),
@@ -299,6 +302,8 @@ def main(args, cfg_env=None):
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, dones, info = env.step(action)
             # print(info)
+            if "fetch" in args.task.lower():
+                next_obs = next_obs["observation"]
             cost = np.array([info_["cost"] for info_ in info])
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
@@ -326,18 +331,20 @@ def main(args, cfg_env=None):
                 #writer.add_scalar("risk/risk_loss", risk_loss, global_step)
 
             for i, info_ in enumerate(info):
-                if "final_observation" in info_:
+                if dones[i]:
+                # if "final_observation" in info_:
                     # info_["final_observation"] = np.array(
                     #     [
                     #         array if array is not None else np.zeros(obs.shape[-1])
                     #         for array in info_["final_observation"]
                     #     ],
                     # )
-                    info_["final_observation"] = torch.as_tensor(
-                        info_["final_observation"],
-                        dtype=torch.float32,
-                        device=device,
-                    )
+                    # info_["final_observation"] = torch.as_tensor(
+                    #     info_["final_observation"],
+                    #     dtype=torch.float32,
+                    #     device=device,
+                    # )
+                    info_["final_observation"] = next_obs[i]
                     # print(f_costs[i])
                     if args.use_risk and args.fine_tune_risk:
                         f_risks = torch.empty_like(f_costs[i])

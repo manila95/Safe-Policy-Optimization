@@ -36,7 +36,17 @@ from typing import Callable
 import gym 
 import envs.mujoco_safety_gym
 import gym.vector as AsyncVectorEnv
+# from gym.wrappers import FlattenObservation
 from envs.wrappers import NormalizeActionWrapper
+
+class FlattenObs(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.env = env
+        
+    def step(self, action):
+        next_state, reward, done, info = self.env.step(action)
+        return next_state, reward, done, info
 
 
 def make_mujoco_env(num_envs:int, env_id: str, seed: int|None = None):
@@ -45,24 +55,43 @@ def make_mujoco_env(num_envs:int, env_id: str, seed: int|None = None):
         # env = NormalizeActionWrapper(env)
         # return env 
     # env_fns = [lambda: create_env() for _ in range(num_envs)]
-    env = gym.vector.AsyncVectorEnv([
-        lambda: gym.make(env_id),
-        lambda: gym.make(env_id),
-        lambda: gym.make(env_id),
-        lambda: gym.make(env_id),
-        lambda: gym.make(env_id),
-        lambda: gym.make(env_id),
-        lambda: gym.make(env_id),
-        lambda: gym.make(env_id),
-        lambda: gym.make(env_id),
-        lambda: gym.make(env_id),
-        ])
+    if "fetch" in env_id.lower():
+        env = gym.vector.AsyncVectorEnv([
+            lambda: FlattenObs(gym.make(env_id)),
+            lambda: FlattenObs(gym.make(env_id)),
+            lambda: FlattenObs(gym.make(env_id)),
+            lambda: FlattenObs(gym.make(env_id)),
+            lambda: FlattenObs(gym.make(env_id)),
+            lambda: FlattenObs(gym.make(env_id)),
+            lambda: FlattenObs(gym.make(env_id)),
+            lambda: FlattenObs(gym.make(env_id)),
+            lambda: FlattenObs(gym.make(env_id)),
+            lambda: FlattenObs(gym.make(env_id)),
+            ])
+    else:
+        env = gym.vector.AsyncVectorEnv([
+            lambda: gym.make(env_id),
+            lambda: gym.make(env_id),
+            lambda: gym.make(env_id),
+            lambda: gym.make(env_id),
+            lambda: gym.make(env_id),
+            lambda: gym.make(env_id),
+            lambda: gym.make(env_id),
+            lambda: gym.make(env_id),
+            lambda: gym.make(env_id),
+            lambda: gym.make(env_id),
+            ])
+    # env = FlattenObservation(env)
     # env = AsyncVectorEnv(env_fns)
     # env = SafeNormalizeObservation(env)
     # env.reset(seed=seed)
-    obs_space = env.single_observation_space
-    act_space = env.single_action_space
-
+    if "fetch" in env_id.lower():
+        obs_space = env.single_observation_space["observation"]
+        act_space = env.single_action_space
+    else:    
+        obs_space = env.single_observation_space
+        act_space = env.single_action_space
+    print(obs_space)
     return env, obs_space, act_space
 
 

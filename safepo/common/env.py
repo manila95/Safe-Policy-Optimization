@@ -27,10 +27,46 @@ try :
 except ImportError:
     pass
 from typing import Callable
-import safety_gymnasium
-from safety_gymnasium.wrappers import SafeAutoResetWrapper, SafeRescaleAction, SafeUnsqueeze
-from safety_gymnasium.vector.async_vector_env import SafetyAsyncVectorEnv
-from safepo.common.wrappers import ShareSubprocVecEnv, ShareDummyVecEnv, ShareEnv, SafeNormalizeObservation, MultiGoalEnv
+# import safety_gymnasium
+# from safety_gymnasium.wrappers import SafeAutoResetWrapper, SafeRescaleAction, SafeUnsqueeze
+# from safety_gymnasium.vector.async_vector_env import SafetyAsyncVectorEnv
+# from safepo.common.wrappers import ShareSubprocVecEnv, ShareDummyVecEnv, ShareEnv, SafeNormalizeObservation, MultiGoalEnv
+
+
+import gym 
+import envs.mujoco_safety_gym
+import gym.vector as AsyncVectorEnv
+from envs.wrappers import NormalizeActionWrapper
+
+
+def make_mujoco_env(num_envs:int, env_id: str, seed: int|None = None):
+    # def create_env() -> Callable:
+    #     env = gym.make(env_id)
+        # env = NormalizeActionWrapper(env)
+        # return env 
+    # env_fns = [lambda: create_env() for _ in range(num_envs)]
+    env = gym.vector.AsyncVectorEnv([
+        lambda: gym.make(env_id),
+        lambda: gym.make(env_id),
+        lambda: gym.make(env_id),
+        lambda: gym.make(env_id),
+        lambda: gym.make(env_id),
+        lambda: gym.make(env_id),
+        lambda: gym.make(env_id),
+        lambda: gym.make(env_id),
+        lambda: gym.make(env_id),
+        lambda: gym.make(env_id),
+        ])
+    # env = AsyncVectorEnv(env_fns)
+    # env = SafeNormalizeObservation(env)
+    # env.reset(seed=seed)
+    obs_space = env.single_observation_space
+    act_space = env.single_action_space
+
+    return env, obs_space, act_space
+
+
+
 
 def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
     """
@@ -51,7 +87,7 @@ def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
         >>> 
         >>> env, obs_space, act_space = make_sa_mujoco_env(
         >>>     num_envs=1, 
-        >>>     env_id="SafetyPointGoal1-v0", 
+        >>>     env_id="SafetyPointGoal1-v2", 
         >>>     seed=0
         >>> )
     """

@@ -39,6 +39,90 @@ try :
 except ImportError:
     pass
 
+
+
+
+
+from typing import Union
+
+import gym
+import numpy as np
+
+
+class SafeRescaleAction(gym.ActionWrapper, gym.utils.RecordConstructorArgs):
+    """Affinely rescales the continuous action space of the environment to the range [min_action, max_action].
+
+    The base environment :attr:`env` must have an action space of type :class:`spaces.Box`. If :attr:`min_action`
+    or :attr:`max_action` are numpy arrays, the shape must match the shape of the environment's action space.
+
+    Example:
+        >>> import safety_gymnasium
+        >>> from safety_gymnasium.wrappers import RescaleAction
+        >>> import numpy as np
+        >>> env = safety_gymnasium.make("SafetyPointGoal1-v0")
+        >>> env = RescaleAction(env, min_action=-1, max_action=1)
+
+    """
+
+    def __init__(
+        self,
+        env: gym.Env,
+        min_action: Union[float, int, np.ndarray],
+        max_action: Union[float, int, np.ndarray],
+    ) -> None:
+        """Initializes the :class:`RescaleAction` wrapper.
+
+        Args:
+            env (Env): The environment to apply the wrapper
+            min_action (float, int or np.ndarray): The min values for each action.
+                This may be a numpy array or a scalar.
+            max_action (float, int or np.ndarray): The max values for each action.
+                This may be a numpy array or a scalar.
+        """
+        gym.utils.RecordConstructorArgs.__init__(
+            self,
+            min_action=min_action,
+            max_action=max_action,
+        )
+        gym.ActionWrapper.__init__(self, env)
+
+        self.min_action = (
+            np.zeros(env.action_space.shape, dtype=env.action_space.dtype) + min_action
+        )
+        self.max_action = (
+            np.zeros(env.action_space.shape, dtype=env.action_space.dtype) + max_action
+        )
+
+    def action(self, action):
+        """Rescales the action
+
+        Rescales the action affinely from [:attr:`min_action`, :attr:`max_action`] to the action
+        space of the base environment, :attr:`env`.
+
+        Args:
+            action: The action to rescale
+
+        Returns:
+            The rescaled action
+        """
+        low = self.env.action_space.low
+        high = self.env.action_space.high
+        return low + (high - low) * (
+            (action - self.min_action) / (self.max_action - self.min_action)
+        )
+
+
+
+
+
+
+
+
+
+
+
+
+
 class SafeNormalizeObservation(NormalizeObservation):
     """This wrapper will normalize observations as Gymnasium's NormalizeObservation wrapper does."""
 

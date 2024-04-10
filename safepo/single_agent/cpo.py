@@ -35,7 +35,7 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
+from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_mujoco_env
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
@@ -171,20 +171,20 @@ def main(args, cfg_env=None):
     torch.set_num_threads(4)
     device = torch.device(f'{args.device}:{args.device_id}')
 
-    import wandb
-    #wandb.login(key="7fd30ee0915aa367ca41345b56bd4fba756ca55a")
-    run = wandb.init(config=vars(args), entity="kaustubh_umontreal",
-                project="risk_aware_exploration",
-                monitor_gym=True,
-                sync_tensorboard=True, save_code=True)
+    # import wandb
+    # #wandb.login(key="7fd30ee0915aa367ca41345b56bd4fba756ca55a")
+    # run = wandb.init(config=vars(args), entity="kaustubh_umontreal",
+    #             project="risk_aware_exploration",
+    #             monitor_gym=True,
+    #             sync_tensorboard=True, save_code=True)
 
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
 
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
+        env, obs_space, act_space = make_mujoco_env(
             num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        eval_env, _, _ = make_sa_mujoco_env(num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = make_mujoco_env(num_envs=1, env_id=args.task, seed=None)
         config = default_cfg
 
     else:
@@ -265,7 +265,7 @@ def main(args, cfg_env=None):
     logger.save_config(dict_args)
     logger.setup_torch_saver(policy.actor)
     logger.log("Start with training.")
-    obs, _ = env.reset()
+    obs = env.reset()
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
     ep_ret, ep_cost, ep_len = (
         np.zeros(args.num_envs),
@@ -281,28 +281,37 @@ def main(args, cfg_env=None):
 
     logger.store(**{"risk/risk_loss": 0})
     # training loop
+    f_next_obs, f_costs = [None]*args.num_envs, [None]*args.num_envs
+
+    global_step = 0
+    total_violations = 0
+
+    # training loop
     for epoch in range(epochs):
         rollout_start_time = time.time()
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
+            global_step += 1
             with torch.no_grad():
-                risk = risk_model(obs) if args.use_risk else None 
-                act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
-            action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
-            next_obs, reward, cost, terminated, truncated, info = env.step(action)
+                    risk = risk_model(obs) if args.use_risk else None
+                    act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)
 
+            action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
+            next_obs, reward, dones, info = env.step(action)
+            # print(info)
+            cost = np.array([info_["cost"] for info_ in info])
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
-            next_obs, reward, cost, terminated, truncated = (
+            next_obs, reward, cost, dones = (
                 torch.as_tensor(x, dtype=torch.float32, device=device)
-                for x in (next_obs, reward, cost, terminated, truncated)
+                for x in (next_obs, reward, cost, dones)
             )
             if args.use_risk and args.fine_tune_risk:
-                f_next_obs = next_obs.unsqueeze(0).to("cpu") if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0).to("cpu")], axis=0)
-                f_costs = cost.unsqueeze(0).to("cpu") if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0).to("cpu")], axis=0)
+                for i in range(args.num_envs):
+                    f_next_obs[i] = next_obs[i].unsqueeze(0).to("cpu") if f_next_obs[i] is None else torch.concat([f_next_obs[i], next_obs[i].unsqueeze(0).to("cpu")], axis=0)
+                    f_costs[i] = cost[i].unsqueeze(0).to("cpu") if f_costs[i] is None else torch.concat([f_costs[i], cost[i].unsqueeze(0).to("cpu")], axis=0)
             # print(info)
-
 
             if args.use_risk and args.fine_tune_risk and len(rb) > 0 and global_step % args.risk_update_period == 0:
                     risk_data = rb.sample(args.risk_batch_size)
@@ -312,33 +321,32 @@ def main(args, cfg_env=None):
                     risk_loss.backward()
                     opt_risk.step()
                     logger.store(**{"risk/risk_loss": risk_loss.item()})
+            else:
+                    logger.store(**{"risk/risk_loss": 0})
                 #writer.add_scalar("risk/risk_loss", risk_loss, global_step)
 
-            global_step += args.num_envs 
-            if "final_observation" in info:
-                info["final_observation"] = np.array(
-                    [
-                        array if array is not None else np.zeros(obs.shape[-1])
-                        for array in info["final_observation"]
-                    ],
-                )
-                info["final_observation"] = torch.as_tensor(
-                    info["final_observation"],
-                    dtype=torch.float32,
-                    device=device,
-                )
-                if args.use_risk and args.fine_tune_risk:
-                    f_risks = torch.empty_like(f_costs)
-                    for i in range(args.num_envs):
-                        f_risks[:, i] = compute_fear(f_costs[:, i])
-
-                    f_risks = f_risks.view(-1, 1)
-                    f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks.cpu().numpy(), 1)))
-                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, f_risks_quant, f_risks)
-
-                    f_next_obs, f_costs = None, None
-
-                final_risk = risk_model(info["final_observation"]) if args.use_risk else None
+            for i, info_ in enumerate(info):
+                if "final_observation" in info_:
+                    # info_["final_observation"] = np.array(
+                    #     [
+                    #         array if array is not None else np.zeros(obs.shape[-1])
+                    #         for array in info_["final_observation"]
+                    #     ],
+                    # )
+                    info_["final_observation"] = torch.as_tensor(
+                        info_["final_observation"],
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    # print(f_costs[i])
+                    if args.use_risk and args.fine_tune_risk:
+                        f_risks = torch.empty_like(f_costs[i])
+                        f_risks = compute_fear(f_costs[i])
+                        f_risks = f_risks.view(-1, 1)
+                        f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, f_risks.cpu().numpy()))
+                        rb.add(None, f_next_obs[i].view(-1, obs_space.shape[0]), None, None, None, None, f_risks_quant, f_risks)
+                        f_next_obs[i], f_costs[i] = None, None
+                    final_risk = risk_model(info_["final_observation"].view(-1, obs_space.shape[0])) if args.use_risk else None
 
             buffer.store(
                 obs=obs,
@@ -353,8 +361,8 @@ def main(args, cfg_env=None):
             obs = next_obs
             risk = risk_model(obs) if args.use_risk else None
             epoch_end = steps >= local_steps_per_epoch - 1
-            for idx, (done, time_out) in enumerate(zip(terminated, truncated)):
-                if epoch_end or done or time_out:
+            for idx, done in enumerate(dones):
+                if epoch_end or done:
                     last_value_r = torch.zeros(1, device=device)
                     last_value_c = torch.zeros(1, device=device)
                     if not done:
@@ -364,7 +372,7 @@ def main(args, cfg_env=None):
                                 _, _, last_value_r, last_value_c = policy.step(
                                     obs[idx], risk_idx, deterministic=False
                                 )
-                        if time_out:
+                        if done:
                             with torch.no_grad():
                                 final_risk_idx = final_risk[idx] if args.use_risk else None
                                 _, _, last_value_r, last_value_c = policy.step(
@@ -372,7 +380,7 @@ def main(args, cfg_env=None):
                                 )
                         last_value_r = last_value_r.unsqueeze(0)
                         last_value_c = last_value_c.unsqueeze(0)
-                    if done or time_out:
+                    if done:
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
@@ -713,13 +721,13 @@ def main(args, cfg_env=None):
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)
-                if args.task not in isaac_gym_map.keys():
-                    logger.save_state(
-                        state_dict={
-                            "Normalizer": env.obs_rms,
-                        },
-                        itr = epoch
-                    )
+                # if args.task not in isaac_gym_map.keys():
+                #     logger.save_state(
+                #         state_dict={
+                #             "Normalizer": env.obs_rms,
+                #         },
+                #         itr = epoch
+                #     )
 
     ## Save Policy 
     torch.save(policy.state_dict(), os.path.join(args.log_dir, "policy.pt"))

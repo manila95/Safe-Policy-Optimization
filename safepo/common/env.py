@@ -30,10 +30,12 @@ from typing import Callable
 import safety_gymnasium
 from safety_gymnasium.wrappers import SafeAutoResetWrapper, SafeRescaleAction, SafeUnsqueeze
 from safety_gymnasium.vector.async_vector_env import SafetyAsyncVectorEnv
-from safepo.common.wrappers import ShareSubprocVecEnv, ShareDummyVecEnv, ShareEnv, SafeNormalizeObservation, MultiGoalEnv, SafeGymNormalizeObservation
+from safepo.common.wrappers import ShareSubprocVecEnv, ShareDummyVecEnv, ShareEnv, SafeNormalizeObservation, MultiGoalEnv, SafeGymNormalizeObservation, SafePandaNormalizeObservation
 
+import panda_gym
 import gymnasium as gym 
 from gymnasium.vector.async_vector_env import AsyncState, AsyncVectorEnv
+
 
 
 def make_sa_gymrobot_env(num_envs: int, env_id: str, seed: int|None = None):
@@ -87,7 +89,66 @@ def make_sa_gymrobot_env(num_envs: int, env_id: str, seed: int|None = None):
         # env = SafeNormalizeObservation(env)
         # env = SafeUnsqueeze(env)
     
-    return env, obs_space, act_space
+    return env, obs_space["observation"], act_space
+
+
+# def make_sa_gymrobot_env(num_envs: int, env_id: str, seed: int|None = None):
+#     """
+#     Creates and wraps an environment based on the specified parameters.
+
+#     Args:
+#         num_envs (int): Number of parallel environments.
+#         env_id (str): ID of the environment to create.
+#         seed (int or None, optional): Seed for the random number generator. Default is None.
+
+#     Returns:
+#         env: The created and wrapped environment.
+#         obs_space: The observation space of the environment.
+#         act_space: The action space of the environment.
+        
+#     Examples:
+#         >>> from safepo.common.env import make_sa_mujoco_env
+#         >>> 
+#         >>> env, obs_space, act_space = make_sa_mujoco_env(
+#         >>>     num_envs=1, 
+#         >>>     env_id="SafetyPointGoal1-v0", 
+#         >>>     seed=0
+#         >>> )
+#     """
+#     # print(env_id)
+#     if num_envs > 1:
+#         def create_env() -> Callable:
+#             """Creates an environment that can enable or disable the environment checker."""
+#         #     env = gym.make(env_id)
+#         #     # env = gym.wrappers.FlattenObservation(env)
+#         #     env = gym.wrappers.ClipAction(env)
+#         #     # env = gym.wrappers.NormalizeObservation(env)
+#         #     return env
+#         # env_fns = [create_env for _ in range(num_envs)]
+#         # env = AsyncVectorEnv(env_fns)
+#         env = gym.vector.make(env_id, num_envs=num_envs)
+#         try:
+#             env.reset(seed=seed)
+#         except:
+#             pass
+#         obs_space = env.single_observation_space
+#         act_space = env.single_action_space
+#     else:
+#         env = gym.make(env_id)
+#         # env = gym.wrappers.FlattenObservation(env)
+#         env = gym.wrappers.ClipAction(env)
+#         # env = gym.wrappers.NormalizeObservation(env)
+#         try:
+#             env.reset(seed=seed)
+#         except:
+#             pass
+#         obs_space = env.observation_space
+#         act_space = env.action_space
+
+#     # obs_space = gym.spaces.utils.flatten_space(obs_space)
+#     # print(obs_space, act_space)
+#     # act_space = env.action_space
+#     return env, obs_space["observation"], act_space
 
 
 

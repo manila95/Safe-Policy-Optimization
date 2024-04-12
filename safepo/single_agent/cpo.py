@@ -22,7 +22,8 @@ import sys
 import time
 from collections import deque
 from typing import Callable
-
+import warnings
+warnings.filterwarnings("ignore")
 import numpy as np
 try: 
     from isaacgym import gymutil
@@ -196,6 +197,7 @@ def main(args, cfg_env=None):
         args.num_envs = env.num_envs
         config = isaac_gym_specific_cfg
 
+    print(obs_space.shape[0], act_space.shape[0])
     # set training steps
     steps_per_epoch = config.get("steps_per_epoch", args.steps_per_epoch)
     total_steps = config.get("total_steps", args.total_steps)
@@ -267,6 +269,7 @@ def main(args, cfg_env=None):
     logger.setup_torch_saver(policy.actor)
     logger.log("Start with training.")
     obs, _ = env.reset()
+    # obs = obs["observation"]
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
     ep_ret, ep_cost, ep_len, ep_goal = (
         np.zeros(args.num_envs),
@@ -279,7 +282,7 @@ def main(args, cfg_env=None):
 
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])
     global_step = 0
-
+    print(obs.size())
     logger.store(**{"risk/risk_loss": 0})
     # training loop
     for epoch in range(epochs):
@@ -291,9 +294,11 @@ def main(args, cfg_env=None):
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, terminated, truncated, info = env.step(action)
+            # print(next_obs)
+            # next_obs = next_obs["observation"]
             cost = info["cost"]
 
-            ep_goal += info["success"]
+            ep_goal += info["is_success"]
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
@@ -318,10 +323,12 @@ def main(args, cfg_env=None):
                 #writer.add_scalar("risk/risk_loss", risk_loss, global_step)
 
             global_step += args.num_envs 
+            
             if "final_observation" in info:
+                # print(info["final_observation"])
                 info["final_observation"] = np.array(
                     [
-                        array if array is not None else np.zeros(obs.shape[-1])
+                        array["observation"] if array is not None else np.zeros(obs.shape[-1])
                         for array in info["final_observation"]
                     ],
                 )

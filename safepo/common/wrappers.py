@@ -54,8 +54,41 @@ class SafeGymNormalizeObservation(NormalizeObservation):
     def step(self, action):
         """Steps through the environment and normalizes the observation."""
         obs, rews, terminateds, truncateds, infos = self.env.step(action)
+        try:
+            obs = obs["observation"]
+        except:
+            pass
         obs = self.normalize(obs) if self.is_vector_env else self.normalize(np.array([obs]))[0]
         return obs, rews, terminateds, truncateds, infos
+
+
+    def reset(self):
+        obs, info = self.env.reset()
+        return obs["observation"], info
+
+# class SafeFilterObservation()
+
+
+
+class SafePandaNormalizeObservation(NormalizeObservation):
+    """This wrapper will normalize observations as Gymnasium's NormalizeObservation wrapper does."""
+
+    def step(self, action):
+        """Steps through the environment and normalizes the observation."""
+        # print(action)
+        obs, rews, terminateds, truncateds, infos = self.env.step(action)
+        # print(obs)
+        obs = obs["observation"]
+        obs = self.normalize(obs) if self.is_vector_env else self.normalize(np.array([obs]))[0]
+        return obs, rews, terminateds, truncateds, infos
+    
+    # def reset(self):
+    #     obs, info = self.env.reset()
+    #     obs = obs["observation"]
+    #     return obs, info
+
+
+
 
 try:
     class GymnasiumIsaacEnv(VecTaskPython):

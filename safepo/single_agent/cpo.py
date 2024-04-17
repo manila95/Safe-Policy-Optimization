@@ -272,7 +272,7 @@ def main(args, cfg_env=None):
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
     )
-    total_cost, eval_total_cost = 0, 0
+    total_violation, total_cost, eval_total_cost = 0, 0, 0
     f_next_obs, f_costs = None, None
 
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])

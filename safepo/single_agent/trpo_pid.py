@@ -233,7 +233,7 @@ def main(args, cfg_env=None):
         opt_risk = torch.optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-10)
 
         if args.fine_tune_risk:
-            rb = ReplayBuffer(buffer_size=args.total_steps)
+            rb = ReplayBuffer(args.total_steps, obs_space.shape[0], risk_size, device)
 
             if args.risk_type == "quantile":
                 weight_tensor = torch.Tensor([1]*args.quantile_num).to(device)
@@ -385,16 +385,16 @@ def main(args, cfg_env=None):
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
-                        goal_deque.append(info["final_info"][idx]["cum_goal_met"])
+                        #goal_deque.append(info["final_info"][idx]["cum_goal_met"])
                         total_cost += ep_cost[idx]
                         violations = np.sum(np.array(cost_deque) > args.cost_limit)
-                        total_violations += violations
+                        total_violations += int(ep_cost[idx] > args.cost_limit)
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),
                                 "Metrics/EpCost": np.mean(cost_deque),
                                 "Metrics/EpLen": np.mean(len_deque),
-                                "Metrics/EpGoal": np.mean(goal_deque),
+                                #"Metrics/EpGoal": np.mean(goal_deque),
                                 "Metrics/TotalCost": total_cost,
                                 "Metrics/ViolationRate": np.mean(np.array(cost_deque) > args.cost_limit),
                                 "Metrics/TotalViolation": total_violations,
@@ -608,7 +608,7 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpCost")
             logger.log_tabular("Metrics/TotalCost")
             logger.log_tabular("Metrics/EpLen")
-            logger.log_tabular("Metrics/EpGoal")
+            #logger.log_tabular("Metrics/EpGoal")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")

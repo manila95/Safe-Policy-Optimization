@@ -230,7 +230,7 @@ def main(args, cfg_env=None):
         opt_risk = torch.optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-10)
 
         if args.fine_tune_risk:
-            rb = ReplayBuffer(buffer_size=args.total_steps)
+            rb = ReplayBuffer(args.total_steps, obs_space.shape[0], risk_size, device)
 
             if args.risk_type == "quantile":
                 weight_tensor = torch.Tensor([1]*args.quantile_num).to(device)
@@ -377,6 +377,7 @@ def main(args, cfg_env=None):
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
                         total_cost += ep_cost[idx]
+                        total_violation += int(ep_cost[idx] > args.cost_limit)
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),
@@ -384,7 +385,7 @@ def main(args, cfg_env=None):
                                 "Metrics/EpLen": np.mean(len_deque),
                                 "Metrics/TotalCost": total_cost,
                                 "Metrics/ViolationRate": np.mean(np.array(cost_deque) > args.cost_limit),
-                                "Metrics/TotalViolation": np.sum(np.array(cost_deque) > args.cost_limit),
+                                "Metrics/TotalViolation": total_violation,
                             }
                         )
                         ep_ret[idx] = 0.0

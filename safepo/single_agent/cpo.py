@@ -230,7 +230,7 @@ def main(args, cfg_env=None):
         opt_risk = torch.optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-10)
 
         if args.fine_tune_risk:
-            rb = ReplayBuffer(buffer_size=args.total_steps)
+            rb = ReplayBuffer(args.total_steps, obs_space.shape[0], risk_size, device=device)
 
             if args.risk_type == "quantile":
                 weight_tensor = torch.Tensor([1]*args.quantile_num).to(device)
@@ -280,9 +280,12 @@ def main(args, cfg_env=None):
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])
     global_step = 0
 
+    
     logger.store(**{"risk/risk_loss": 0})
     # training loop
     for epoch in range(epochs):
+        sample_time = 0 
+        update_time = 0
         rollout_start_time = time.time()
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
@@ -292,8 +295,10 @@ def main(args, cfg_env=None):
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, terminated, truncated, info = env.step(action)
             cost = info["cost"]
-
-            ep_goal += info["success"]
+            try:
+                ep_goal += info["success"]
+            except:
+                ep_goal += np.zeros(args.num_envs)
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
@@ -302,21 +307,25 @@ def main(args, cfg_env=None):
                 for x in (next_obs, reward, cost, terminated, truncated)
             )
             if args.use_risk and args.fine_tune_risk:
-                f_next_obs = next_obs.unsqueeze(0).to("cpu") if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0).to("cpu")], axis=0)
-                f_costs = cost.unsqueeze(0).to("cpu") if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0).to("cpu")], axis=0)
+                f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
+                f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
 
-
+            t1 = time.time()
             if args.use_risk and args.fine_tune_risk and len(rb) > 0 and global_step % args.risk_update_period == 0:
-                    risk_data = rb.sample(args.risk_batch_size)
+                    risk_data = rb.sample(args.risk_batch_size) #if risk_data is None else risk_data
+                    t2 = time.time()
+                    sample_time += (t2 - t1)
                     pred = risk_model(risk_data["next_obs"].to(device))
                     risk_loss = risk_criterion(pred, torch.argmax(risk_data["risks"].squeeze(), axis=1).to(device))
                     opt_risk.zero_grad()
                     risk_loss.backward()
                     opt_risk.step()
+                    t3 = time.time()
+                    update_time += (t3 - t2)
                     logger.store(**{"risk/risk_loss": risk_loss.item()})
                 #writer.add_scalar("risk/risk_loss", risk_loss, global_step)
-
+            
             global_step += args.num_envs 
             if "final_observation" in info:
                 info["final_observation"] = np.array(
@@ -636,6 +645,8 @@ def main(args, cfg_env=None):
                 "Misc/AcceptanceStep": acceptance_step,
                 "Loss/Loss_actor": (loss_pi_r + loss_pi_c).mean().item(),
                 "Train/KL": kl.cpu(),
+                #"Time/SampleTime": sample_time / 100, 
+                #"Time/UpdateTime": update_time,
             },
         )
 
@@ -716,6 +727,8 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/ViolationRate")
             logger.log_tabular("Metrics/TotalViolation")
             if args.use_risk:
+                logger.log_tabular("Time/sample_time", sample_time / 100)
+                logger.log_tabular("Time/update_time", update_time / 100)
                 logger.log_tabular("risk/risk_loss")
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:

@@ -37,7 +37,7 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
+from safepo.common.env import make_sa_mujoco_env, make_sa_gymrobot_env, make_sa_isaac_env
 from safepo.common.lagrange import PIDLagrangian as Lagrange
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
@@ -181,13 +181,13 @@ def main(args, cfg_env=None):
     #            sync_tensorboard=True, save_code=True)
 
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
-    risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num)])
+    risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])
 
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
+        env, obs_space, act_space = make_sa_gymrobot_env(
             num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        eval_env, _, _ = make_sa_mujoco_env(num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = make_sa_gymrobot_env(num_envs=1, env_id=args.task, seed=None)
         config = default_cfg
 
     else:
@@ -233,7 +233,7 @@ def main(args, cfg_env=None):
         opt_risk = torch.optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-10)
 
         if args.fine_tune_risk:
-            rb = ReplayBuffer(buffer_size=args.total_steps)
+            rb = ReplayBuffer(args.total_steps, obs_space.shape[0], risk_size, device)
 
             if args.risk_type == "quantile":
                 weight_tensor = torch.Tensor([1]*args.quantile_num).to(device)
@@ -301,7 +301,8 @@ def main(args, cfg_env=None):
                     act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)
 
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
-            next_obs, reward, cost, terminated, truncated, info = env.step(action)
+            next_obs, reward, terminated, truncated, info = env.step(action)
+            cost = info["cost"]
 
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
@@ -310,10 +311,17 @@ def main(args, cfg_env=None):
                 torch.as_tensor(x, dtype=torch.float32, device=device)
                 for x in (next_obs, reward, cost, terminated, truncated)
             )
-            if args.use_risk and args.fine_tune_risk:
-                f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
-                f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
+#            if args.use_risk and args.fine_tune_risk:
+#                f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
+#                f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
+            
+            if args.use_risk and args.fine_tune_risk:
+                f_next_obs = next_obs.unsqueeze(0).to("cpu") if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0).to("cpu")], axis=0)
+                f_costs = cost.unsqueeze(0).to("cpu") if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0).to("cpu")], axis=0)
+            # print(info)
+
+
 
             if args.use_risk and args.fine_tune_risk and len(rb) > 0 and global_step % args.risk_update_period == 0:
                     risk_data = rb.sample(args.risk_batch_size)
@@ -385,7 +393,7 @@ def main(args, cfg_env=None):
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
-                        goal_deque.append(info["final_info"][idx]["cum_goal_met"])
+                        #goal_deque.append(info["final_info"][idx]["cum_goal_met"])
                         total_cost += ep_cost[idx]
                         violations = np.sum(np.array(cost_deque) > args.cost_limit)
                         total_violations += violations
@@ -394,7 +402,7 @@ def main(args, cfg_env=None):
                                 "Metrics/EpRet": np.mean(rew_deque),
                                 "Metrics/EpCost": np.mean(cost_deque),
                                 "Metrics/EpLen": np.mean(len_deque),
-                                "Metrics/EpGoal": np.mean(goal_deque),
+                                #"Metrics/EpGoal": np.mean(goal_deque),
                                 "Metrics/TotalCost": total_cost,
                                 "Metrics/ViolationRate": np.mean(np.array(cost_deque) > args.cost_limit),
                                 "Metrics/TotalViolation": total_violations,
@@ -608,13 +616,13 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpCost")
             logger.log_tabular("Metrics/TotalCost")
             logger.log_tabular("Metrics/EpLen")
-            logger.log_tabular("Metrics/EpGoal")
+            #logger.log_tabular("Metrics/EpGoal")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")
                 logger.log_tabular("Metrics/EvalEpLen")
                 logger.log_tabular("Metrics/EvalTotalCost")
-                logger.log_tabular("Metrics/EvalEpGoal")
+                #logger.log_tabular("Metrics/EvalEpGoal")
 
             logger.log_tabular("Train/Epoch", epoch + 1)
             logger.log_tabular("Train/TotalSteps", (epoch + 1) * args.steps_per_epoch)

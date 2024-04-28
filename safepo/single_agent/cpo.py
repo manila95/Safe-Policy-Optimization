@@ -275,8 +275,7 @@ def main(args, cfg_env=None):
         np.zeros(args.num_envs)
     )
     total_cost, eval_total_cost = 0, 0
-    f_next_obs, f_costs = None, None
-
+    f_next_obs, f_costs = [None]*args.num_envs, [None]*args.num_envs
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])
     global_step = 0
 
@@ -294,7 +293,7 @@ def main(args, cfg_env=None):
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, terminated, truncated, info = env.step(action)
-            cost = info["cost"]
+            cost = terminated #info["cost"]
             try:
                 ep_goal += info["success"]
             except:
@@ -307,8 +306,9 @@ def main(args, cfg_env=None):
                 for x in (next_obs, reward, cost, terminated, truncated)
             )
             if args.use_risk and args.fine_tune_risk:
-                f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
-                f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
+                for i in range(args.num_envs):
+                    f_next_obs[i] = next_obs[i].unsqueeze(0) if f_next_obs[i] is None else torch.concat([f_next_obs[i], next_obs[i].unsqueeze(0)], axis=0)
+                    f_costs[i] = cost[i].unsqueeze(0) if f_costs[i] is None else torch.concat([f_costs[i], cost[i].unsqueeze(0)], axis=0)
             # print(info)
 
             t1 = time.time()
@@ -340,15 +340,16 @@ def main(args, cfg_env=None):
                     device=device,
                 )
                 if args.use_risk and args.fine_tune_risk:
-                    f_risks = torch.empty_like(f_costs)
+                    #f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
-                        f_risks[:, i] = compute_fear(f_costs[:, i])
+                        if not(terminated[i] or truncated[i]):
+                            continue
+                        f_risks = compute_fear(f_costs[i])
+                        f_risks = f_risks.view(-1, 1)
+                        f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks.cpu().numpy(), 1)))
+                        rb.add(None, f_next_obs[i].view(-1, obs_space.shape[0]), None, None, None, None, f_risks_quant, f_risks)
 
-                    f_risks = f_risks.view(-1, 1)
-                    f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks.cpu().numpy(), 1)))
-                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, f_risks_quant, f_risks)
-
-                    f_next_obs, f_costs = None, None
+                        f_next_obs[i], f_costs[i] = None, None
 
                 final_risk = risk_model(info["final_observation"]) if args.use_risk else None
 

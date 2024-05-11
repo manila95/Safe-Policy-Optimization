@@ -35,13 +35,23 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_gymrobot_env
+#from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_gymrobot_env
+
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
+#from safety_gymnasium.tasks.safe_isaac_gym.safe_dexteroushands.tasks.base.vec_task import VecTaskPython
+#from safety_gymnasium.tasks.safe_isaac_gym.envs.tasks.base.vec_task import VecTaskPython
+from safepo.common.vec_task import VecTaskPython 
+#safety_gymnasium/tasks/safe_issac_gym/safe_dexteroushands/tasks/base/vec_task
 from src.models.risk_models import *
 from src.datasets.risk_datasets import *
 from src.utils import * 
+
+
+import isaacgym
+import isaacgymenvs
+import torch
 
 STEP_FRACTION=0.8
 CPO_SEARCHING_STEPS=15
@@ -162,6 +172,57 @@ def fvp(
     return flat_grad_grad_kl + params * 0.1
 
 
+
+def make_sa_isaac_env(num_envs, args):
+    """
+    Creates and returns a VecTaskPython environment for the single agent Isaac Gym task.
+
+    Args:
+        args: Command-line arguments.
+        cfg: Configuration for the environment.
+        cfg_train: Training configuration.
+        sim_params: Parameters for the simulation.
+
+    Returns:
+        env: VecTaskPython environment for the single agent Isaac Gym task.
+
+    Warning:
+        SafePO's single agent Isaac Gym task is not ready for use yet.
+    """
+    # create native task and pass custom config
+    envs = isaacgymenvs.make(
+    seed=args.seed,
+    task=args.task,
+    num_envs=num_envs,
+    sim_device=args.device,
+    rl_device=args.device,
+    headless=True)
+
+    #try:
+    #    envs = GymnasiumIsaacEnv(envs, args.device)
+    #except ModuleNotFoundError:
+    #    envs = None
+
+    return envs, envs.observation_space, envs.action_space
+
+try:
+    class GymnasiumIsaacEnv(VecTaskPython):
+        """This wrapper will use Gymnasium API to wrap IsaacGym environment."""
+
+        def step(self, action):
+            """Steps through the environment."""
+            obs, rews, costs, terminated, infos = super().step(action)
+            truncated = terminated
+            return obs, rews, costs, terminated, truncated, infos
+
+        def reset(self):
+            """Resets the environment."""
+            obs = super().reset()
+            return obs, {}
+except NameError:
+    pass
+
+
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
     random.seed(args.seed)
@@ -181,12 +242,9 @@ def main(args, cfg_env=None):
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
 
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_gymrobot_env(
-            num_envs=args.num_envs, env_id=args.task, seed=args.seed
-        )
-        eval_env, _, _ = make_sa_gymrobot_env(num_envs=1, env_id=args.task, seed=None)
+        env, obs_space, act_space = make_sa_isaac_env(args.num_envs, args)
+        #eval_env, _, _ = make_sa_isaac_env(1, args)
         config = default_cfg
-
     else:
         sim_params = parse_sim_params(args, cfg_env, None)
         env = make_sa_isaac_env(args=args, cfg=cfg_env, sim_params=sim_params)
@@ -196,6 +254,8 @@ def main(args, cfg_env=None):
         args.num_envs = env.num_envs
         config = isaac_gym_specific_cfg
 
+
+    print("Environment created successfully")
     # set training steps
     steps_per_epoch = config.get("steps_per_epoch", args.steps_per_epoch)
     total_steps = config.get("total_steps", args.total_steps)
@@ -272,13 +332,14 @@ def main(args, cfg_env=None):
     logger.save_config(dict_args)
     logger.setup_torch_saver(policy.actor)
     logger.log("Start with training.")
-    obs, _ = env.reset()
-    obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
+    obs = env.reset()
+    obs = obs['obs']
+    #obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
     ep_ret, ep_cost, ep_len, ep_goal = (
-        np.zeros(args.num_envs),
-        np.zeros(args.num_envs),
-        np.zeros(args.num_envs),
-        np.zeros(args.num_envs)
+        torch.zeros(args.num_envs),
+        torch.zeros(args.num_envs),
+        torch.zeros(args.num_envs),
+        torch.zeros(args.num_envs)
     )
     total_cost, eval_total_cost = 0, 0
     f_next_obs, f_costs = None, None
@@ -286,6 +347,7 @@ def main(args, cfg_env=None):
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])
     global_step = 0
 
+    final_observation = [None]*args.num_envs
     
     logger.store(**{"risk/risk_loss": 0})
     # training loop
@@ -298,15 +360,21 @@ def main(args, cfg_env=None):
             with torch.no_grad():
                 risk = risk_model(obs) if args.use_risk else None 
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
-            action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
-            next_obs, reward, terminated, truncated, info = env.step(action)
-            cost = info["cost"]
+            action = act.detach().squeeze() #if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
+            
+            next_obs, reward, terminated, info = env.step(action)
+            next_obs = next_obs['obs']
+            #print(info)
+            terminated = torch.logical_and(terminated, torch.logical_not(info["time_outs"]))
+            truncated = info["time_outs"]
+            #print(terminated)
+            cost = terminated
             try:
                 ep_goal += info["success"]
             except:
                 ep_goal += np.zeros(args.num_envs)
-            ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
-            ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
+            ep_ret += reward.cpu()
+            ep_cost += cost.cpu() #.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
             next_obs, reward, cost, terminated, truncated = (
                 torch.as_tensor(x, dtype=torch.float32, device=device)
@@ -333,18 +401,26 @@ def main(args, cfg_env=None):
                 #writer.add_scalar("risk/risk_loss", risk_loss, global_step)
             
             global_step += args.num_envs 
-            if "final_observation" in info:
-                info["final_observation"] = np.array(
-                    [
-                        array if array is not None else np.zeros(obs.shape[-1])
-                        for array in info["final_observation"]
-                    ],
-                )
-                info["final_observation"] = torch.as_tensor(
-                    info["final_observation"],
-                    dtype=torch.float32,
-                    device=device,
-                )
+            #if "final_observation" in info:
+            for i, t in enumerate(terminated):
+                #if t: 
+                #    final_observation[i] = next_obs[i]
+                #info["final_observation"] = np.array(
+                #    [
+                #        array if array is not None else np.zeros(obs.shape[-1])
+                #        for array in info["final_observation"]
+                #    ],
+                #)
+                #info["final_observation"] = torch.as_tensor(
+                #    info["final_observation"],
+                #    dtype=torch.float32,
+                #    device=device,
+                #)
+                if not t:
+                    continue
+
+                #ep_cost[i] = 0
+                #ep_ret[i] = 0 
                 if args.use_risk and args.fine_tune_risk:
                     f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
@@ -356,7 +432,7 @@ def main(args, cfg_env=None):
 
                     f_next_obs, f_costs = None, None
 
-                final_risk = risk_model(info["final_observation"]) if args.use_risk else None
+                #final_risk = risk_model(final_ob) if args.use_risk else None
 
             buffer.store(
                 obs=obs,
@@ -375,21 +451,22 @@ def main(args, cfg_env=None):
                 if epoch_end or done or time_out:
                     last_value_r = torch.zeros(1, device=device)
                     last_value_c = torch.zeros(1, device=device)
-                    if not done:
-                        if epoch_end:
-                            with torch.no_grad():
-                                risk_idx = risk[idx] if args.use_risk else None
-                                _, _, last_value_r, last_value_c = policy.step(
+                    #if not done:
+                        #if epoch_end:
+                    with torch.no_grad():
+                        risk_idx = risk[idx] if args.use_risk else None
+                        _, _, last_value_r, last_value_c = policy.step(
                                     obs[idx], risk_idx, deterministic=False
                                 )
-                        if time_out:
-                            with torch.no_grad():
-                                final_risk_idx = final_risk[idx] if args.use_risk else None
-                                _, _, last_value_r, last_value_c = policy.step(
-                                    info["final_observation"][idx], final_risk_idx, deterministic=False
-                                )
-                        last_value_r = last_value_r.unsqueeze(0)
-                        last_value_c = last_value_c.unsqueeze(0)
+                        
+                        #if time_out:
+                        #    with torch.no_grad():
+                        #        final_risk_idx = final_risk[idx] if args.use_risk else None
+                        #        _, _, last_value_r, last_value_c = policy.step(
+                        #            info["final_observation"][idx], final_risk_idx, deterministic=False
+                        #        )
+                    last_value_r = last_value_r.unsqueeze(0)
+                    last_value_c = last_value_c.unsqueeze(0)
                     if done or time_out:
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
@@ -413,6 +490,7 @@ def main(args, cfg_env=None):
                         ep_goal[idx] = 0.0
                         logger.logged = False
 
+                    #print(last_value_r, last_value_c)
                     buffer.finish_path(
                         last_value_r=last_value_r, last_value_c=last_value_c, idx=idx
                     )
@@ -739,13 +817,13 @@ def main(args, cfg_env=None):
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)
-                if args.task not in isaac_gym_map.keys():
-                    logger.save_state(
-                        state_dict={
-                            "Normalizer": env.obs_rms,
-                        },
-                        itr = epoch
-                    )
+                #if args.task not in isaac_gym_map.keys():
+                #    logger.save_state(
+                #        state_dict={
+                #            "Normalizer": env.obs_rms,
+                #        },
+                #        itr = epoch
+                #    )
 
     ## Save Policy 
     torch.save(policy.state_dict(), os.path.join(args.log_dir, "policy.pt"))

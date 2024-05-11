@@ -36,6 +36,11 @@ import gymnasium as gym
 from gymnasium.vector.async_vector_env import AsyncState, AsyncVectorEnv
 
 
+import isaacgym
+import isaacgymenvs
+import torch
+
+
 def make_sa_gymrobot_env(num_envs: int, env_id: str, seed: int|None = None):
     """
     Creates and wraps an environment based on the specified parameters.
@@ -195,7 +200,7 @@ def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
     
     return env, obs_space, act_space
 
-def make_sa_isaac_env(args, cfg, sim_params):
+def make_sa_isaac_env(num_envs, args):
     """
     Creates and returns a VecTaskPython environment for the single agent Isaac Gym task.
 
@@ -212,26 +217,19 @@ def make_sa_isaac_env(args, cfg, sim_params):
         SafePO's single agent Isaac Gym task is not ready for use yet.
     """
     # create native task and pass custom config
-    device_id = args.device_id
-    rl_device = args.device
+    envs = isaacgymenvs.make(
+	seed=args.seed, 
+	task=args.task, 
+	num_envs=num_envs, 
+	sim_device=args.device,
+	rl_device=args.device,)
 
-    cfg["seed"] = args.seed
-    cfg_task = cfg["env"]
-    cfg_task["seed"] = cfg["seed"]
-    task = eval(args.task)(
-        cfg=cfg,
-        sim_params=sim_params,
-        physics_engine=args.physics_engine,
-        device_type=args.device,
-        device_id=device_id,
-        headless=args.headless,
-        is_multi_agent=False)
     try:
-        env = GymnasiumIsaacEnv(task, rl_device)
+        envs = GymnasiumIsaacEnv(envs, args.device)
     except ModuleNotFoundError:
-        env = None
+        envs = None
 
-    return env
+    return envs
 
 def make_ma_mujoco_env(scenario, agent_conf, seed, cfg_train):
     """

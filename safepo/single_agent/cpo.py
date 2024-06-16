@@ -203,7 +203,7 @@ def main(args, cfg_env=None):
     epochs = total_steps // steps_per_epoch
     # create the actor-critic module
     policy = ActorVCritic(
-        obs_dim=obs_space.shape[0],
+        obs_dim=576,
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
         use_risk=args.use_risk,
@@ -266,7 +266,9 @@ def main(args, cfg_env=None):
     logger.setup_torch_saver(policy.actor)
     logger.log("Start with training.")
     obs, _ = env.reset()
-    obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
+    obs = torch.as_tensor(obs["vision"], dtype=torch.float32, device=device)
+    obs = obs.transpose(1, 3)
+    print(obs.size())
     ep_ret, ep_cost, ep_len = (
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
@@ -285,6 +287,7 @@ def main(args, cfg_env=None):
         rollout_start_time = time.time()
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
+
             with torch.no_grad():
                 risk = risk_model(obs) if args.use_risk else None 
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
@@ -294,10 +297,12 @@ def main(args, cfg_env=None):
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
+            next_obs = next_obs["vision"]
             next_obs, reward, cost, terminated, truncated = (
                 torch.as_tensor(x, dtype=torch.float32, device=device)
                 for x in (next_obs, reward, cost, terminated, truncated)
             )
+            next_obs = next_obs.transpose(1, 3)
             if args.use_risk and args.fine_tune_risk:
                 f_next_obs = next_obs.unsqueeze(0).to("cpu") if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0).to("cpu")], axis=0)
                 f_costs = cost.unsqueeze(0).to("cpu") if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0).to("cpu")], axis=0)
@@ -341,7 +346,7 @@ def main(args, cfg_env=None):
                 final_risk = risk_model(info["final_observation"]) if args.use_risk else None
 
             buffer.store(
-                obs=obs,
+                obs=obs.transpose(1, 3),
                 act=act,
                 reward=reward,
                 cost=cost,
@@ -449,6 +454,7 @@ def main(args, cfg_env=None):
 
         # update policy
         data = buffer.get()
+        data["obs"] = data["obs"].transpose(1, 3)
         with torch.no_grad():
             data["risk"] = risk_model(data["obs"]) if args.use_risk else None
         fvp_obs = data["obs"][:: 1]

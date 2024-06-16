@@ -63,7 +63,7 @@ def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
             return env
         env_fns = [create_env for _ in range(num_envs)]
         env = SafetyAsyncVectorEnv(env_fns)
-        env = SafeNormalizeObservation(env)
+        # env = SafeNormalizeObservation(env)
         env.reset(seed=seed)
         obs_space = env.single_observation_space
         act_space = env.single_action_space
@@ -74,10 +74,10 @@ def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
         act_space = env.action_space
         env = SafeAutoResetWrapper(env)
         env = SafeRescaleAction(env, -1.0, 1.0)
-        env = SafeNormalizeObservation(env)
+        # env = SafeNormalizeObservation(env)
         env = SafeUnsqueeze(env)
     
-    return env, obs_space, act_space
+    return env, obs_space["vision"], act_space
 
 def make_sa_isaac_env(args, cfg, sim_params):
     """

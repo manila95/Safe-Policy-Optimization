@@ -27,6 +27,26 @@ from safepo.utils.util import check, init
 from safepo.utils.util import get_shape_from_obs_space
 
 
+class ImageEncoder(nn.Module):
+    def __init__(self, in_ch=3):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, 32, 4, stride=2)
+        self.conv2 = nn.Conv2d(32, 64, 4, stride=2)
+        self.conv3 = nn.Conv2d(64, 64, 4, stride=2)
+
+        self.maxpool1 = nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))
+        self.maxpool2 = nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))
+        self.maxpool3 = nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        x = self.maxpool1(self.activation(self.conv1(x)))
+        x = self.maxpool2(self.activation(self.conv2(x)))
+        x = self.maxpool3(self.activation(self.conv3(x)))
+        print(x.size())
+        return x.view(x.size()[0], -1)
+
+
 def build_mlp_network(sizes):
     """
     Build a multi-layer perceptron (MLP) neural network.
@@ -51,6 +71,8 @@ def build_mlp_network(sizes):
 class RiskNet(nn.Module):
     def __init__(self, sizes, risk_size):
         super().__init__()
+
+        self.img_enc = ImageEncoder()
         self.affine_obs = nn.Linear(sizes[0], sizes[1])
         self.affine_risk = nn.Linear(risk_size, 12)
         self.activation = nn.Tanh()
@@ -60,6 +82,8 @@ class RiskNet(nn.Module):
 
     def forward(self, x, risk):
         # print(risk.size())
+        x = self.img_enc(x)
+        print(x.size())
         obs = self.activation(self.affine_obs(x))
         risk = self.activation(self.affine_risk(risk))
         x = torch.cat([obs, risk], axis=-1)
@@ -107,6 +131,7 @@ class Actor(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
         super().__init__()
         self.use_risk = use_risk
+        self.img_enc = ImageEncoder()
         # print(use_risk)
         if use_risk:
             self.mean = build_risk_mlp_network([obs_dim]+hidden_sizes+[act_dim], risk_size)
@@ -115,6 +140,8 @@ class Actor(nn.Module):
         self.log_std = nn.Parameter(torch.zeros(act_dim), requires_grad=True)
 
     def forward(self, obs: torch.Tensor, risk=None):
+        obs = self.img_enc(obs)
+        print(obs.size())
         if self.use_risk:
             mean = self.mean(obs, risk)
         else:
@@ -144,6 +171,7 @@ class VCritic(nn.Module):
 
     def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
         super().__init__()
+        self.img_enc = ImageEncoder()
         self.use_risk = use_risk
         if self.use_risk:
             self.critic = build_risk_mlp_network([obs_dim]+hidden_sizes+[1], risk_size)
@@ -151,6 +179,8 @@ class VCritic(nn.Module):
             self.critic = build_mlp_network([obs_dim]+hidden_sizes+[1])
 
     def forward(self, obs, risk=None):
+        obs = self.img_enc(obs)
+        print(obs.size())
         if self.use_risk:
             return torch.squeeze(self.critic(obs, risk), -1)
         else:

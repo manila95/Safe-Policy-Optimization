@@ -144,6 +144,7 @@ def parse_sim_params(args, cfg, cfg_train):
 def single_agent_args():
     custom_parameters = [
         {"name": "--seed", "type": int, "default":0, "help": "Random seed"},
+        {"name": "--vel-thresh", "type": float, "default": 2.2, "help": "velocity threshold for mujoco locomotion environments"},
         {"name": "--use-eval", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Use evaluation environment for testing"},
         {"name": "--task", "type": str, "default": "SafetyPointGoal1-v0", "help": "The task to run"},
         {"name": "--num-envs", "type": int, "default": 10, "help": "The number of parallel game environments"},

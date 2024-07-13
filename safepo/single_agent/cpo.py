@@ -182,9 +182,9 @@ def main(args, cfg_env=None):
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_gymrobot_env(
-            num_envs=args.num_envs, env_id=args.task, seed=args.seed
+            num_envs=args.num_envs, env_id=args.task, vel_thresh=args.vel_thresh, seed=args.seed
         )
-        eval_env, _, _ = make_sa_gymrobot_env(num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = make_sa_gymrobot_env(num_envs=1, env_id=args.task, vel_thresh=args.vel_thresh, seed=None)
         config = default_cfg
 
     else:

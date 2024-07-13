@@ -36,7 +36,7 @@ import gymnasium as gym
 from gymnasium.vector.async_vector_env import AsyncState, AsyncVectorEnv
 
 
-def make_sa_gymrobot_env(num_envs: int, env_id: str, seed: int|None = None):
+def make_sa_gymrobot_env(num_envs: int, env_id: str, vel_thresh: float, seed: int|None = None):
     """
     Creates and wraps an environment based on the specified parameters.
 
@@ -62,7 +62,7 @@ def make_sa_gymrobot_env(num_envs: int, env_id: str, seed: int|None = None):
     if num_envs > 1:
         def create_env() -> Callable:
             """Creates an environment that can enable or disable the environment checker."""
-            env = gym.make(env_id)
+            env = gym.make(env_id, vel_thresh=vel_thresh)
             env = SafeRescaleAction(env, -1.0, 1.0)
             return env
         env_fns = [create_env for _ in range(num_envs)]
@@ -75,7 +75,7 @@ def make_sa_gymrobot_env(num_envs: int, env_id: str, seed: int|None = None):
         obs_space = env.single_observation_space
         act_space = env.single_action_space
     else:
-        env = gym.make(env_id)
+        env = gym.make(env_id, vel_thresh=vel_thresh)
         try:
             env.reset(seed=seed)
         except:

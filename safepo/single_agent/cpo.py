@@ -37,7 +37,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from safepo.common.buffer import VectorizedOnPolicyBuffer
 from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_gymrobot_env
 from safepo.common.logger import EpochLogger
-from safepo.common.model import ActorVCritic
+from safepo.common.model import ActorVCritic, c51
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
 from src.models.risk_models import *
 from src.datasets.risk_datasets import *
@@ -178,7 +178,7 @@ def main(args, cfg_env=None):
                 monitor_gym=True,
                 sync_tensorboard=True, save_code=True)
 
-    risk_size = args.quantile_num if args.risk_type == "quantile" else 2
+    risk_size = args.quantile_num 
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_gymrobot_env(
@@ -221,29 +221,35 @@ def main(args, cfg_env=None):
     cost_critic_optimizer = torch.optim.Adam(
         policy.cost_critic.parameters(), lr=1e-3
     )
+    if args.use_risk and args.risk_type == "c51":
+        c51Risk = c51(args, obs_space.shape[0], args.seed, n_atoms=args.quantile_num)
+        risk_model = c51Risk.v_net
 
-    if args.use_risk:
+
+    elif args.use_risk:
         risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
                     "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
 
         risk_model = BayesRiskEst(obs_size=obs_space.shape[0], batch_norm=True, out_size=risk_size)
         if os.path.exists(args.risk_model_path):
-            risk_model.load_state_dict(torch.load(args.risk_model_path))#, map_location=device))
+            risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
 
         risk_model.to(device)
         risk_model.eval()
 
         opt_risk = torch.optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-10)
 
-        if args.fine_tune_risk:
-            rb = ReplayBuffer(args.total_steps, obs_space.shape[0], risk_size, device=device)
+    if args.fine_tune_risk:
+        rb = ReplayBuffer(args.total_steps, obs_space.shape[0], risk_size, device)
 
+        if args.risk_type != "c51":
             if args.risk_type == "quantile":
                 weight_tensor = torch.Tensor([1]*args.quantile_num).to(device)
                 weight_tensor[0] = args.risk_weight
             elif args.risk_type == "binary":
                 weight_tensor = torch.Tensor([1., args.risk_weight]).to(device)
             risk_criterion = nn.NLLLoss(weight=weight_tensor)
+
 
     # create the vectorized on-policy buffer
     buffer = VectorizedOnPolicyBuffer(
@@ -281,7 +287,7 @@ def main(args, cfg_env=None):
         np.zeros(args.num_envs)
     )
     total_cost, eval_total_cost = 0, 0
-    f_next_obs, f_costs = None, None
+    f_obs, f_next_obs, f_costs, f_dones = None, None, None, None
 
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])
     global_step = 0
@@ -312,23 +318,33 @@ def main(args, cfg_env=None):
                 torch.as_tensor(x, dtype=torch.float32, device=device)
                 for x in (next_obs, reward, cost, terminated, truncated)
             )
+            dones = torch.logical_or(terminated, truncated).int()
+
             if args.use_risk and args.fine_tune_risk:
-                f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
-                f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
+                f_obs = obs.unsqueeze(0).to("cpu") if f_obs is None else torch.concat([f_obs, obs.unsqueeze(0).to("cpu")], axis=0)
+                f_next_obs = next_obs.unsqueeze(0).to("cpu") if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0).to("cpu")], axis=0)
+                f_costs = cost.unsqueeze(0).to("cpu") if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0).to("cpu")], axis=0)
+                f_dones = dones.unsqueeze(0).to("cpu") if f_dones is None else torch.concat([f_dones, dones.unsqueeze(0).to("cpu")], axis=0)
             # print(info)
 
             t1 = time.time()
             if args.use_risk and args.fine_tune_risk and len(rb) > 0 and global_step % args.risk_update_period == 0:
-                    risk_data = rb.sample(args.risk_batch_size) #if risk_data is None else risk_data
-                    t2 = time.time()
-                    sample_time += (t2 - t1)
-                    pred = risk_model(risk_data["next_obs"].to(device))
-                    risk_loss = risk_criterion(pred, torch.argmax(risk_data["risks"].squeeze(), axis=1).to(device))
-                    opt_risk.zero_grad()
-                    risk_loss.backward()
-                    opt_risk.step()
-                    t3 = time.time()
-                    update_time += (t3 - t2)
+                    risk_data = rb.sample(args.risk_batch_size) #if risk_data is None else risk_data'
+
+                    if args.risk_type == "c51":
+                        risk_loss = c51Risk.update(risk_data)
+
+                    else:
+
+                        t2 = time.time()
+                        sample_time += (t2 - t1)
+                        pred = risk_model(risk_data["next_obs"].to(device))
+                        risk_loss = risk_criterion(pred, torch.argmax(risk_data["risks"].squeeze(), axis=1).to(device))
+                        opt_risk.zero_grad()
+                        risk_loss.backward()
+                        opt_risk.step()
+                        t3 = time.time()
+                        update_time += (t3 - t2)
                     logger.store(**{"risk/risk_loss": risk_loss.item()})
                 #writer.add_scalar("risk/risk_loss", risk_loss, global_step)
             
@@ -346,20 +362,24 @@ def main(args, cfg_env=None):
                     device=device,
                 )
                 if args.use_risk and args.fine_tune_risk:
-                    f_risks = torch.empty_like(f_costs)
-                    for i in range(args.num_envs):
-                        f_risks[:, i] = compute_fear(f_costs[:, i])
+                    f_risks_quant, f_risks = None, None
+                    if args.risk_type != "c51":
+                        f_risks = torch.empty_like(f_costs)
+                        for i in range(args.num_envs):
+                            f_risks[:, i] = compute_fear(f_costs[:, i])
 
-                    f_risks = f_risks.view(-1, 1)
-                    f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks.cpu().numpy(), 1)))
-                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, f_risks_quant, f_risks)
+                        f_risks = f_risks.view(-1, 1)
+                        f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks.cpu().numpy(), 1)))
+                    
 
-                    f_next_obs, f_costs = None, None
+                    rb.add(f_obs.view(-1, obs_space.shape[0]), f_next_obs.view(-1, obs_space.shape[0]), None, None, f_dones.view(-1, 1), f_costs.view(-1, 1), f_risks_quant, f_risks)
+
+                    f_next_obs, f_costs, f_obs, f_dones = None, None, None, None
 
                 final_risk = risk_model(info["final_observation"]) if args.use_risk else None
 
             buffer.store(
-                obs=obs,
+                obs=obs,    
                 act=act,
                 reward=reward,
                 cost=cost,

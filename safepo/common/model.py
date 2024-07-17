@@ -26,6 +26,7 @@ from safepo.utils.mlp import MLPBase
 from safepo.utils.util import check, init
 from safepo.utils.util import get_shape_from_obs_space
 
+import torch.optim as optim
 
 def build_mlp_network(sizes):
     """
@@ -155,6 +156,93 @@ class VCritic(nn.Module):
             return torch.squeeze(self.critic(obs, risk), -1)
         else:
             return torch.squeeze(self.critic(obs), -1)
+
+class c51QNetwork(nn.Module):
+    def __init__(self, state_size, seed, n_atoms=10, v_min=0, v_max=1):
+        super().__init__()
+        # self.seed = torch.manual_seed(seed)
+        self.n_atoms = n_atoms
+        self.register_buffer("atoms", torch.linspace(v_min, v_max, steps=n_atoms))
+        self.n = 4
+        self.network = nn.Sequential(
+            nn.Linear(state_size, 120),
+            nn.ReLU(),
+            nn.Linear(120, 84),
+            nn.ReLU(),
+            nn.Linear(84, n_atoms),
+        )
+
+    def forward(self, x):
+        logits = self.network(x)
+        # probability mass function for each action
+        pmfs = torch.softmax(logits.view(len(x), self.n_atoms), dim=1)
+        return pmfs
+
+class c51(nn.Module):
+
+    def __init__(self, opt, state_size, seed, gamma=0.99, n_atoms=10):
+        super().__init__()
+        self.opt = opt
+        self.v_min = 0 
+        self.v_max = 100
+        self.n_atoms = n_atoms
+        self.v_net = c51QNetwork(state_size, seed, n_atoms=n_atoms)
+        self.target_net = c51QNetwork(state_size, seed, n_atoms=n_atoms)
+        self.gamma = gamma
+
+        self.optimizer = optim.Adam(self.v_net.parameters(), lr=opt.risk_lr)
+
+
+    def update(self, data):
+        states, costs, next_states, dones = data["obs"], data["costs"], data["next_obs"], data["dones"]
+
+        with torch.no_grad():
+            next_pmfs = self.target_net(next_states)
+            # Compute Q targets for current states 
+            next_atoms = costs + self.opt.gamma * self.target_net.atoms * (1 - dones)
+            delta_z = self.target_net.atoms[1] - self.target_net.atoms[0]
+            tz = next_atoms.clamp(self.v_min, self.v_max)
+
+            b = (tz - self.v_min) / delta_z
+            l = b.floor().clamp(0, self.n_atoms - 1)
+            u = b.ceil().clamp(0, self.n_atoms - 1)
+
+            d_m_l = (u + (l == u).float() - b) * next_pmfs
+            d_m_u = (b - l) * next_pmfs
+            target_pmfs = torch.zeros_like(next_pmfs)
+ 
+            for i in range(target_pmfs.size(0)):
+                target_pmfs[i].index_add_(0, l[i].long(), d_m_l[i])
+                target_pmfs[i].index_add_(0, u[i].long(), d_m_u[i])
+
+        old_pmfs = self.v_net(states)
+        loss = (-(target_pmfs * old_pmfs.clamp(min=1e-5, max=1 - 1e-5).log()).sum(-1)).mean()
+
+
+        # Minimize the loss
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        # In order to log the loss value
+        self.loss = loss.item()
+
+        # ------------------- update target network ------------------- #
+        self.soft_update(self.v_net, self.target_net, self.opt.tau) 
+
+        return loss
+
+    def soft_update(self, local_model, target_model, tau):
+        """Soft update model parameters.
+        θ_target = τ*θ_local + (1 - τ)*θ_target
+        Params
+        ======
+            local_model (PyTorch model): weights will be copied from
+            target_model (PyTorch model): weights will be copied to
+            tau (float): interpolation parameter 
+        """
+        for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
+            target_param.data.copy_(tau*local_param.data + (1.0-tau)*target_param.data)
 
 
 class ActorVCritic(nn.Module):

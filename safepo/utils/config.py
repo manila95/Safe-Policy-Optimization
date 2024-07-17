@@ -175,6 +175,9 @@ def single_agent_args():
         {"name": "--pid-kp", "type": float, "default": 0.1, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-ki", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-kd", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
+        {"name": "--tau", "type": float, "default": 0.05, "help": "tau for c51 risk training "},
+
+
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

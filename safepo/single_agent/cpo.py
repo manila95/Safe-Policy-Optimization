@@ -178,7 +178,7 @@ def main(args, cfg_env=None):
                 monitor_gym=True,
                 sync_tensorboard=True, save_code=True)
 
-    risk_size = args.quantile_num 
+    risk_size = args.quantile_num if args.risk_type != "cost_critic" else 1
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_gymrobot_env(
@@ -208,6 +208,7 @@ def main(args, cfg_env=None):
         hidden_sizes=config["hidden_sizes"],
         use_risk=args.use_risk,
         risk_size=risk_size,
+        risk_type=args.risk_type,
     ).to(device)
 
     if os.path.exists(args.policy_model_path):
@@ -224,6 +225,9 @@ def main(args, cfg_env=None):
     if args.use_risk and args.risk_type == "c51":
         c51Risk = c51(args, obs_space.shape[0], args.seed, n_atoms=args.quantile_num)
         risk_model = c51Risk.v_net
+
+    elif args.use_risk and args.risk_type == "cost_critic":
+        risk_model = policy.cost_critic
 
 
     elif args.use_risk:
@@ -400,16 +404,16 @@ def main(args, cfg_env=None):
                             with torch.no_grad():
                                 risk_idx = risk[idx] if args.use_risk else None
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    obs[idx], risk_idx, deterministic=False
+                                    obs[idx].unsqueeze(0), risk_idx.squeeze().unsqueeze(0), deterministic=False
                                 )
                         if time_out:
                             with torch.no_grad():
                                 final_risk_idx = final_risk[idx] if args.use_risk else None
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    info["final_observation"][idx], final_risk_idx, deterministic=False
+                                    info["final_observation"][idx].unsqueeze(0), final_risk_idx.unsqueeze(0), deterministic=False
                                 )
-                        last_value_r = last_value_r.unsqueeze(0)
-                        last_value_c = last_value_c.unsqueeze(0)
+                        last_value_r = last_value_r.squeeze().unsqueeze(0)
+                        last_value_c = last_value_c.squeeze().unsqueeze(0)
                     if done or time_out:
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])

@@ -117,6 +117,9 @@ class Actor(nn.Module):
         self.log_std = nn.Parameter(torch.zeros(act_dim), requires_grad=True)
 
     def forward(self, obs: torch.Tensor, risk=None):
+        if risk is not None:
+            if len(risk.size()) <2:
+                risk = risk.unsqueeze(-1)
         if self.use_risk:
             mean = self.mean(obs, risk)
         else:
@@ -144,16 +147,20 @@ class VCritic(nn.Module):
         value_estimate = critic(observation)
     """
 
-    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, risk_type=None):
         super().__init__()
         self.use_risk = use_risk
-        if self.use_risk:
+        self.risk_type = risk_type
+        if self.use_risk and risk_type != "cost_critic":
             self.critic = build_risk_mlp_network([obs_dim]+hidden_sizes+[1], risk_size)
         else:
             self.critic = build_mlp_network([obs_dim]+hidden_sizes+[1])
 
     def forward(self, obs, risk=None):
-        if self.use_risk:
+        if risk is not None:
+            if len(risk.size()) < 2:
+                risk = risk.unsqueeze(-1)
+        if self.use_risk and self.risk_type != "cost_critic":
             return torch.squeeze(self.critic(obs, risk), -1)
         else:
             return torch.squeeze(self.critic(obs), -1)
@@ -179,11 +186,12 @@ class ActorVCritic(nn.Module):
         value_estimate = actor_critic.get_value(observation)
     """
 
-    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, risk_type=None):
         super().__init__()
         self.use_risk = use_risk
+        self.risk_type = risk_type
         self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
-        self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+        self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, risk_type=risk_type)
         self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
 
     def get_value(self, obs, risk=None):
@@ -225,7 +233,10 @@ class ActorVCritic(nn.Module):
         log_prob = dist.log_prob(action).sum(axis=-1)
         if self.use_risk:
             value_r = self.reward_critic(obs, risk)
-            value_c = self.cost_critic(obs, risk)
+            if self.risk_type == "cost_critic":
+                value_c = self.cost_critic(obs)
+            else:
+                value_c = self.cost_critic(obs, risk)
         else:
             value_r = self.reward_critic(obs)
             value_c = self.cost_critic(obs)

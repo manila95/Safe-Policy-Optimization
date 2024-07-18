@@ -222,7 +222,7 @@ def main(args, cfg_env=None):
 
         risk_model = BayesRiskEst(obs_size=obs_space.shape[0], batch_norm=True, out_size=risk_size)
         if os.path.exists(args.risk_model_path):
-            risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
+            risk_model.load_state_dict(torch.load(args.risk_model_path)) #, map_location=device))
 
         risk_model.to(device)
         risk_model.eval()

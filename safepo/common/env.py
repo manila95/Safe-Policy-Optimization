@@ -76,6 +76,8 @@ def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
         env = SafeRescaleAction(env, -1.0, 1.0)
         # env = SafeNormalizeObservation(env)
         env = SafeUnsqueeze(env)
+
+    print(obs_space)
     
     return env, obs_space["vision"], act_space
 

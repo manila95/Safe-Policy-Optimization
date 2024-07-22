@@ -203,7 +203,7 @@ def main(args, cfg_env=None):
     epochs = total_steps // steps_per_epoch
     # create the actor-critic module
     policy = ActorVCritic(
-        obs_dim=576,
+        obs_dim=144,
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
         use_risk=args.use_risk,
@@ -265,8 +265,13 @@ def main(args, cfg_env=None):
     logger.save_config(dict_args)
     logger.setup_torch_saver(policy.actor)
     logger.log("Start with training.")
+    print("i am here")
     obs, _ = env.reset()
-    obs = torch.as_tensor(obs["vision"], dtype=torch.float32, device=device)
+    print(obs)
+    obs = np.concatenate([obs[i]['vision'] for i in range(args.num_envs)])
+    obs = obs.reshape(args.num_envs, 64, 64, 3)
+    obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
+    print(obs.size())
     obs = obs.transpose(1, 3)
     print(obs.size())
     ep_ret, ep_cost, ep_len = (
@@ -293,11 +298,13 @@ def main(args, cfg_env=None):
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
-
+            next_obs = np.concatenate([next_obs[i]["vision"] for i in range(args.num_envs)])
+            next_obs = next_obs.reshape(args.num_envs, 64, 64, 3) 
+            print(next_obs.shape)
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
-            next_obs = next_obs["vision"]
+            #next_obs = np.concatenate([next_obs[i]["vision"] for i in range(args.num_envs)])
             next_obs, reward, cost, terminated, truncated = (
                 torch.as_tensor(x, dtype=torch.float32, device=device)
                 for x in (next_obs, reward, cost, terminated, truncated)
@@ -324,11 +331,14 @@ def main(args, cfg_env=None):
                 info["final_observation"] = np.array(
                     [
                         array if array is not None else np.zeros(obs.shape[-1])
-                        for array in info["final_observation"]
+                        for array in info["final_observation"]['vision']
                     ],
                 )
+                #print(info["final_observation"].shape)
+                print(info["final_observation"])
+                final_obs = np.concatenate([info["final_observation"][i]["vision"] for i in range(args.num_envs)])
                 info["final_observation"] = torch.as_tensor(
-                    info["final_observation"],
+                    final_obs,
                     dtype=torch.float32,
                     device=device,
                 )

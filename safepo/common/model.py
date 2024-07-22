@@ -42,7 +42,7 @@ class ImageEncoder(nn.Module):
     def forward(self, x):
         x = self.maxpool1(self.activation(self.conv1(x)))
         x = self.maxpool2(self.activation(self.conv2(x)))
-        x = self.maxpool3(self.activation(self.conv3(x)))
+        x = self.activation(self.conv3(x))
         print(x.size())
         return x.view(x.size()[0], -1)
 

@@ -31,8 +31,8 @@ class ImageEncoder(nn.Module):
     def __init__(self, in_ch=3):
         super().__init__()
         self.conv1 = nn.Conv2d(in_ch, 32, 4, stride=2)
-        self.conv2 = nn.Conv2d(32, 64, 4, stride=2)
-        self.conv3 = nn.Conv2d(64, 64, 4, stride=2)
+        self.conv2 = nn.Conv2d(32, 64, 4)
+        self.conv3 = nn.Conv2d(64, 64, 4)
 
         self.maxpool1 = nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))
         self.maxpool2 = nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))
@@ -43,7 +43,6 @@ class ImageEncoder(nn.Module):
         x = self.maxpool1(self.activation(self.conv1(x)))
         x = self.maxpool2(self.activation(self.conv2(x)))
         x = self.activation(self.conv3(x))
-        print(x.size())
         return x.view(x.size()[0], -1)
 
 
@@ -83,7 +82,7 @@ class RiskNet(nn.Module):
     def forward(self, x, risk):
         # print(risk.size())
         x = self.img_enc(x)
-        print(x.size())
+        # print(x.size())
         obs = self.activation(self.affine_obs(x))
         risk = self.activation(self.affine_risk(risk))
         x = torch.cat([obs, risk], axis=-1)
@@ -141,7 +140,7 @@ class Actor(nn.Module):
 
     def forward(self, obs: torch.Tensor, risk=None):
         obs = self.img_enc(obs)
-        print(obs.size())
+        # print(obs.size())
         if self.use_risk:
             mean = self.mean(obs, risk)
         else:
@@ -180,7 +179,6 @@ class VCritic(nn.Module):
 
     def forward(self, obs, risk=None):
         obs = self.img_enc(obs)
-        print(obs.size())
         if self.use_risk:
             return torch.squeeze(self.critic(obs, risk), -1)
         else:

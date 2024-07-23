@@ -51,7 +51,7 @@ default_cfg = {
     'hidden_sizes': [64, 64],
     'gamma': 0.99,
     'target_kl': 0.01,
-    'batch_size': 128,
+    'batch_size': 256,
     'learning_iters': 10,
     'max_grad_norm': 40.0,
 }
@@ -203,7 +203,7 @@ def main(args, cfg_env=None):
     epochs = total_steps // steps_per_epoch
     # create the actor-critic module
     policy = ActorVCritic(
-        obs_dim=144,
+        obs_dim=576,
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
         use_risk=args.use_risk,
@@ -267,13 +267,10 @@ def main(args, cfg_env=None):
     logger.log("Start with training.")
     print("i am here")
     obs, _ = env.reset()
-    print(obs)
     obs = np.concatenate([obs[i]['vision'] for i in range(args.num_envs)])
     obs = obs.reshape(args.num_envs, 64, 64, 3)
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
-    print(obs.size())
     obs = obs.transpose(1, 3)
-    print(obs.size())
     ep_ret, ep_cost, ep_len = (
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
@@ -300,7 +297,6 @@ def main(args, cfg_env=None):
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
             next_obs = np.concatenate([next_obs[i]["vision"] for i in range(args.num_envs)])
             next_obs = next_obs.reshape(args.num_envs, 64, 64, 3) 
-            print(next_obs.shape)
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
@@ -333,15 +329,15 @@ def main(args, cfg_env=None):
                         array if array is not None else np.zeros(obs.shape[-1])
                         for array in info["final_observation"]['vision']
                     ],
-                )
-                #print(info["final_observation"].shape)
-                print(info["final_observation"])
-                final_obs = np.concatenate([info["final_observation"][i]["vision"] for i in range(args.num_envs)])
+                ).reshape(args.num_envs, 64, 64, 3)
+                # print(info["final_observation"].shape)
+                # # print(info["final_observation"])
+                # final_obs = np.concatenate([info["final_observation"][i]["vision"] for i in range(args.num_envs)])
                 info["final_observation"] = torch.as_tensor(
-                    final_obs,
+                    info["final_observation"],
                     dtype=torch.float32,
                     device=device,
-                )
+                ).transpose(1, 3)
                 if args.use_risk and args.fine_tune_risk:
                     f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
@@ -356,13 +352,13 @@ def main(args, cfg_env=None):
                 final_risk = risk_model(info["final_observation"]) if args.use_risk else None
 
             buffer.store(
-                obs=obs.transpose(1, 3),
-                act=act,
-                reward=reward,
-                cost=cost,
-                value_r=value_r,
-                value_c=value_c,
-                log_prob=log_prob,
+                obs=obs.to("cpu").transpose(1, 3),
+                act=act.to("cpu"),
+                reward=reward.to("cpu"),
+                cost=cost.to("cpu"),
+                value_r=value_r.to("cpu"),
+                value_c=value_c.to("cpu"),
+                log_prob=log_prob.to("cpu"),
             )
 
             obs = next_obs
@@ -377,16 +373,17 @@ def main(args, cfg_env=None):
                             with torch.no_grad():
                                 risk_idx = risk[idx] if args.use_risk else None
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    obs[idx], risk_idx, deterministic=False
+                                    obs[idx].squeeze().unsqueeze(0
+                                        ), risk_idx, deterministic=False
                                 )
                         if time_out:
                             with torch.no_grad():
                                 final_risk_idx = final_risk[idx] if args.use_risk else None
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    info["final_observation"][idx], final_risk_idx, deterministic=False
+                                    info["final_observation"][idx].squeeze().unsqueeze(0), final_risk_idx, deterministic=False
                                 )
-                        last_value_r = last_value_r.unsqueeze(0)
-                        last_value_c = last_value_c.unsqueeze(0)
+                        last_value_r = last_value_r.squeeze().unsqueeze(0)
+                        last_value_c = last_value_c.squeeze().unsqueeze(0)
                     if done or time_out:
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
@@ -730,13 +727,13 @@ def main(args, cfg_env=None):
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)
-                if args.task not in isaac_gym_map.keys():
-                    logger.save_state(
-                        state_dict={
-                            "Normalizer": env.obs_rms,
-                        },
-                        itr = epoch
-                    )
+                # if args.task not in isaac_gym_map.keys():
+                #     logger.save_state(
+                #         state_dict={
+                #             "Normalizer": env.obs_rms,
+                #         },
+                #         itr = epoch
+                #     )
 
     ## Save Policy 
     torch.save(policy.state_dict(), os.path.join(args.log_dir, "policy.pt"))

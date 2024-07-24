@@ -147,9 +147,10 @@ def fvp(
         old_distribution, current_distribution
     ).mean()
 
-    grads = torch.autograd.grad(kl, tuple(policy.actor.parameters()), create_graph=True)
+    grads = torch.autograd.grad(kl, tuple(policy.actor.parameters()), create_graph=True, allow_unused=True) 
+    print(grads)
     flat_grad_kl = torch.cat([grad.view(-1) for grad in grads])
-
+    
     kl_p = (flat_grad_kl * params).sum()
     grads = torch.autograd.grad(
         kl_p,
@@ -220,7 +221,7 @@ def main(args, cfg_env=None):
         risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
                     "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
 
-        risk_model = BayesRiskEst(obs_size=obs_space.shape[0], batch_norm=True, out_size=risk_size)
+        risk_model = BayesRiskEst(obs_size=576, batch_norm=True, out_size=risk_size)
         if os.path.exists(args.risk_model_path):
             risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
 
@@ -267,7 +268,8 @@ def main(args, cfg_env=None):
     logger.log("Start with training.")
     print("i am here")
     obs, _ = env.reset()
-    obs = np.concatenate([obs[i]['vision'] for i in range(args.num_envs)])
+    #print(obs['vision'].shape)
+    obs = obs['vision'] #np.concatenate([obs[i]['vision'] for i in range(args.num_envs)])
     obs = obs.reshape(args.num_envs, 64, 64, 3)
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
     obs = obs.transpose(1, 3)
@@ -292,10 +294,11 @@ def main(args, cfg_env=None):
 
             with torch.no_grad():
                 risk = risk_model(obs) if args.use_risk else None 
+                print(obs.size())
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
-            next_obs = np.concatenate([next_obs[i]["vision"] for i in range(args.num_envs)])
+            next_obs = next_obs['vision'] #np.concatenate([next_obs[i]["vision"] for i in range(args.num_envs)])
             next_obs = next_obs.reshape(args.num_envs, 64, 64, 3) 
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
@@ -326,8 +329,8 @@ def main(args, cfg_env=None):
             if "final_observation" in info:
                 info["final_observation"] = np.array(
                     [
-                        array if array is not None else np.zeros(obs.shape[-1])
-                        for array in info["final_observation"]['vision']
+                        array['vision'] if array is not None else np.zeros(obs.shape[-1])
+                        for array in info["final_observation"]
                     ],
                 ).reshape(args.num_envs, 64, 64, 3)
                 # print(info["final_observation"].shape)
@@ -371,14 +374,14 @@ def main(args, cfg_env=None):
                     if not done:
                         if epoch_end:
                             with torch.no_grad():
-                                risk_idx = risk[idx] if args.use_risk else None
+                                risk_idx = risk[idx].unsqueeze(0) if args.use_risk else None
                                 _, _, last_value_r, last_value_c = policy.step(
                                     obs[idx].squeeze().unsqueeze(0
                                         ), risk_idx, deterministic=False
                                 )
                         if time_out:
                             with torch.no_grad():
-                                final_risk_idx = final_risk[idx] if args.use_risk else None
+                                final_risk_idx = final_risk[idx].unsqueeze(0) if args.use_risk else None
                                 _, _, last_value_r, last_value_c = policy.step(
                                     info["final_observation"][idx].squeeze().unsqueeze(0), final_risk_idx, deterministic=False
                                 )

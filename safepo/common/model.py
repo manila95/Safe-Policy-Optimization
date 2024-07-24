@@ -81,10 +81,11 @@ class RiskNet(nn.Module):
 
     def forward(self, x, risk):
         # print(risk.size())
-        x = self.img_enc(x)
+        #x = self.img_enc(x)
         # print(x.size())
         obs = self.activation(self.affine_obs(x))
         risk = self.activation(self.affine_risk(risk))
+        print(obs.size(), risk.size())
         x = torch.cat([obs, risk], axis=-1)
         return self.rest(x)
 

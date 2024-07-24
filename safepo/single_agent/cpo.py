@@ -148,7 +148,7 @@ def fvp(
     ).mean()
 
     grads = torch.autograd.grad(kl, tuple(policy.actor.parameters()), create_graph=True, allow_unused=True) 
-    print(grads)
+    #print(torch.sum(grads))
     flat_grad_kl = torch.cat([grad.view(-1) for grad in grads])
     
     kl_p = (flat_grad_kl * params).sum()
@@ -294,7 +294,7 @@ def main(args, cfg_env=None):
 
             with torch.no_grad():
                 risk = risk_model(obs) if args.use_risk else None 
-                print(obs.size())
+                #print(obs.size())
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
@@ -347,8 +347,9 @@ def main(args, cfg_env=None):
                         f_risks[:, i] = compute_fear(f_costs[:, i])
 
                     f_risks = f_risks.view(-1, 1)
+                    print(f_next_obs.size(), f_risks.size())
                     f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks.cpu().numpy(), 1)))
-                    rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, f_risks_quant, f_risks)
+                    rb.add(None, f_next_obs.view(-1, 3, 64, 64), None, None, None, None, f_risks_quant, f_risks)
 
                     f_next_obs, f_costs = None, None
 

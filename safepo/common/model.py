@@ -71,7 +71,7 @@ class RiskNet(nn.Module):
     def __init__(self, sizes, risk_size):
         super().__init__()
 
-        self.img_enc = ImageEncoder()
+        #self.img_enc = ImageEncoder()
         self.affine_obs = nn.Linear(sizes[0], sizes[1])
         self.affine_risk = nn.Linear(risk_size, 12)
         self.activation = nn.Tanh()
@@ -85,7 +85,7 @@ class RiskNet(nn.Module):
         # print(x.size())
         obs = self.activation(self.affine_obs(x))
         risk = self.activation(self.affine_risk(risk))
-        print(obs.size(), risk.size())
+        #print(obs.size(), risk.size())
         x = torch.cat([obs, risk], axis=-1)
         return self.rest(x)
 

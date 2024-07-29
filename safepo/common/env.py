@@ -59,6 +59,7 @@ def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
         def create_env() -> Callable:
             """Creates an environment that can enable or disable the environment checker."""
             env = safety_gymnasium.make(env_id)
+            #env.metadata['render_fps'] = 90
             env = SafeRescaleAction(env, -1.0, 1.0)
             return env
         env_fns = [create_env for _ in range(num_envs)]

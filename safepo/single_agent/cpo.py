@@ -231,7 +231,7 @@ def main(args, cfg_env=None):
         opt_risk = torch.optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-10)
 
         if args.fine_tune_risk:
-            rb = ReplayBuffer(args.total_steps, obs_space.shape[0], risk_size, device)
+            rb = ReplayBuffer(1e6, obs_space.shape[0], risk_size, device)
 
             if args.risk_type == "quantile":
                 weight_tensor = torch.Tensor([1]*args.quantile_num).to(device)
@@ -309,9 +309,10 @@ def main(args, cfg_env=None):
                 for x in (next_obs, reward, cost, terminated, truncated)
             )
             next_obs = next_obs.transpose(1, 3)
-            if args.use_risk and args.fine_tune_risk:
-                f_next_obs = next_obs.unsqueeze(0).to("cpu") if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0).to("cpu")], axis=0)
-                f_costs = cost.unsqueeze(0).to("cpu") if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0).to("cpu")], axis=0)
+            if args.use_risk and args.fine_tune_risk and len(rb) < rb.buffer_size:
+                #next_obs = next_obs.to(torch.uint8)
+                f_next_obs = next_obs.to(torch.uint8).unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.to(torch.uint8).unsqueeze(0)], axis=0)
+                f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
 
 
@@ -341,7 +342,7 @@ def main(args, cfg_env=None):
                     dtype=torch.float32,
                     device=device,
                 ).transpose(1, 3)
-                if args.use_risk and args.fine_tune_risk:
+                if args.use_risk and args.fine_tune_risk and len(rb) < rb.buffer_size:
                     f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
                         f_risks[:, i] = compute_fear(f_costs[:, i])
@@ -349,14 +350,14 @@ def main(args, cfg_env=None):
                     f_risks = f_risks.view(-1, 1)
                     print(f_next_obs.size(), f_risks.size())
                     f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks.cpu().numpy(), 1)))
-                    rb.add(None, f_next_obs.view(-1, 3, 64, 64), None, None, None, None, f_risks_quant, f_risks)
+                    rb.add(None, f_next_obs.view(-1, 3, 64, 64).to(torch.uint8), None, None, None, None, f_risks_quant, f_risks)
 
                     f_next_obs, f_costs = None, None
 
                 final_risk = risk_model(info["final_observation"]) if args.use_risk else None
 
             buffer.store(
-                obs=obs.to("cpu").transpose(1, 3),
+                obs=obs.transpose(1, 3).to(torch.uint8).to("cpu"),
                 act=act.to("cpu"),
                 reward=reward.to("cpu"),
                 cost=cost.to("cpu"),
@@ -465,7 +466,7 @@ def main(args, cfg_env=None):
 
         # update policy
         data = buffer.get()
-        data["obs"] = data["obs"].transpose(1, 3)
+        data["obs"] = data["obs"].transpose(1, 3).float()
         with torch.no_grad():
             data["risk"] = risk_model(data["obs"]) if args.use_risk else None
         fvp_obs = data["obs"][:: 1]

@@ -53,7 +53,7 @@ class VectorizedOnPolicyBuffer:
         self.buffers: list[dict[str, torch.tensor]] = [
             {
                 "obs": torch.zeros(
-                    (size, *obs_space.shape), dtype=torch.float32, device=device
+                    (size, 64, 64, 4), dtype=torch.float32, device=device
                 ),
                 "act": torch.zeros(
                     (size, *act_space.shape), dtype=torch.float32, device=device

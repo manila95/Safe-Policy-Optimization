@@ -269,8 +269,8 @@ def main(args, cfg_env=None):
     print("i am here")
     obs, _ = env.reset()
     #print(obs['vision'].shape)
-    obs = obs['vision'] #np.concatenate([obs[i]['vision'] for i in range(args.num_envs)])
-    obs = obs.reshape(args.num_envs, 64, 64, 3)
+    obs = np.concatenate([obs['vision'], obs['depth']], axis=-1)  #np.concatenate([obs[i]['vision'] for i in range(args.num_envs)])
+    obs = obs.reshape(args.num_envs, 64, 64, 4)
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
     obs = obs.transpose(1, 3)
     ep_ret, ep_cost, ep_len = (
@@ -298,8 +298,8 @@ def main(args, cfg_env=None):
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
-            next_obs = next_obs['vision'] #np.concatenate([next_obs[i]["vision"] for i in range(args.num_envs)])
-            next_obs = next_obs.reshape(args.num_envs, 64, 64, 3) 
+            next_obs = np.concatenate([next_obs['vision'], next_obs["depth"]], axis=-1) #np.concatenate([next_obs[i]["vision"] for i in range(args.num_envs)])
+            next_obs = next_obs.reshape(args.num_envs, 64, 64, 4) 
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
@@ -330,10 +330,10 @@ def main(args, cfg_env=None):
             if "final_observation" in info:
                 info["final_observation"] = np.array(
                     [
-                        array['vision'] if array is not None else np.zeros(obs.shape[-1])
+                        np.concatenate([array['vision'], array["depth"].reshape(64, 64, 1)], axis=-1) if array is not None else np.zeros(obs.shape[-1])
                         for array in info["final_observation"]
                     ],
-                ).reshape(args.num_envs, 64, 64, 3)
+                ).reshape(args.num_envs, 64, 64, 4)
                 # print(info["final_observation"].shape)
                 # # print(info["final_observation"])
                 # final_obs = np.concatenate([info["final_observation"][i]["vision"] for i in range(args.num_envs)])
@@ -350,7 +350,7 @@ def main(args, cfg_env=None):
                     f_risks = f_risks.view(-1, 1)
                     print(f_next_obs.size(), f_risks.size())
                     f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks.cpu().numpy(), 1)))
-                    rb.add(None, f_next_obs.view(-1, 3, 64, 64).to(torch.uint8), None, None, None, None, f_risks_quant, f_risks)
+                    rb.add(None, f_next_obs.view(-1, 4, 64, 64).to(torch.uint8), None, None, None, None, f_risks_quant, f_risks)
 
                     f_next_obs, f_costs = None, None
 

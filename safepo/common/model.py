@@ -28,7 +28,7 @@ from safepo.utils.util import get_shape_from_obs_space
 
 
 class ImageEncoder(nn.Module):
-    def __init__(self, in_ch=3):
+    def __init__(self, in_ch=4):
         super().__init__()
         self.conv1 = nn.Conv2d(in_ch, 32, 4, stride=2)
         self.conv2 = nn.Conv2d(32, 64, 4)

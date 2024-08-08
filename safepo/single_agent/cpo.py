@@ -402,15 +402,16 @@ def main(args, cfg_env=None):
                     if not done:
                         if epoch_end:
                             with torch.no_grad():
-                                risk_idx = risk[idx] if args.use_risk else None
+                                risk_idx = risk[idx].squeeze().unsqueeze(0) if args.use_risk else None
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    obs[idx].unsqueeze(0), risk_idx.squeeze().unsqueeze(0), deterministic=False
+                                    obs[idx].unsqueeze(0), risk_idx, deterministic=False
                                 )
                         if time_out:
                             with torch.no_grad():
-                                final_risk_idx = final_risk[idx] if args.use_risk else None
+                                #print(info["final_observation"])
+                                final_risk_idx = final_risk[idx].unsqueeze(0) if args.use_risk else None
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    info["final_observation"][idx].unsqueeze(0), final_risk_idx.unsqueeze(0), deterministic=False
+                                    info["final_observation"][idx].unsqueeze(0), final_risk_idx, deterministic=False
                                 )
                         last_value_r = last_value_r.squeeze().unsqueeze(0)
                         last_value_c = last_value_c.squeeze().unsqueeze(0)

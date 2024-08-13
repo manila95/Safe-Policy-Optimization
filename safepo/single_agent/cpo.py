@@ -315,23 +315,7 @@ def main(args, cfg_env=None):
             if args.use_risk and args.fine_tune_risk:
                 f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
                 f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
-            # print(info)
-
-            t1 = time.time()
-            if args.use_risk and args.fine_tune_risk and len(rb) > 0 and global_step % args.risk_update_period == 0:
-                    risk_data = rb.sample(args.risk_batch_size) #if risk_data is None else risk_data
-                    t2 = time.time()
-                    sample_time += (t2 - t1)
-                    pred = risk_model(risk_data["next_obs"].to(device))
-                    risk_loss = risk_criterion(pred, torch.argmax(risk_data["risks"].squeeze(), axis=1).to(device))
-                    opt_risk.zero_grad()
-                    risk_loss.backward()
-                    opt_risk.step()
-                    t3 = time.time()
-                    update_time += (t3 - t2)
-                    logger.store(**{"risk/risk_loss": risk_loss.item()})
-                #writer.add_scalar("risk/risk_loss", risk_loss, global_step)
-            
+           
             global_step += args.num_envs 
             if "final_observation" in info:
                 info["final_observation"] = np.array(
@@ -697,6 +681,29 @@ def main(args, cfg_env=None):
                         "Loss/Loss_cost_critic": loss_c.mean().item(),
                     }
                 )
+
+        ## Update Risk model with on-policy data
+        if args.use_risk and args.fine_tune_risk: 
+            risk_dataloader = DataLoader(
+                dataset=TensorDataset(
+                    rb.next_obs,
+                    rb.risks,
+                ),
+                batch_size=args.risk_batch_size,
+                shuffle=True,
+            )
+            for _ in range(args.num_risk_epochs): 
+                for (next_obs, target_risk) in risk_dataloader:
+                    pred = risk_model(next_obs.to(device))
+                    risk_loss = risk_criterion(pred, torch.argmax(target_risk.squeeze(), axis=1).to(device))
+                    opt_risk.zero_grad()
+                    risk_loss.backward()
+                    opt_risk.step()
+                    logger.store(**{"risk/risk_loss": risk_loss.item()})
+                    print(risk_loss.item())
+            ## Empty replay buffer 
+            rb.reset()
+
         update_end_time = time.time()
         if not logger.logged:
             # log data

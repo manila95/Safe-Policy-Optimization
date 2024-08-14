@@ -270,6 +270,7 @@ def main(args, cfg_env=None):
     obs, _ = env.reset()
     #print(obs['vision'].shape)
     obs = np.concatenate([obs['vision'], obs['depth']], axis=-1)  #np.concatenate([obs[i]['vision'] for i in range(args.num_envs)])
+    print(obs.shape)
     obs = obs.reshape(args.num_envs, 64, 64, 4)
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
     obs = obs.transpose(1, 3)

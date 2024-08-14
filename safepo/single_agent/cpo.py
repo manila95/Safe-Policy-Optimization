@@ -700,7 +700,7 @@ def main(args, cfg_env=None):
                     risk_loss.backward()
                     opt_risk.step()
                     logger.store(**{"risk/risk_loss": risk_loss.item()})
-                    print(risk_loss.item())
+                    #print(risk_loss.item())
             ## Empty replay buffer 
             rb.reset()
 

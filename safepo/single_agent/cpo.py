@@ -169,7 +169,7 @@ def main(args, cfg_env=None):
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = True
     torch.set_num_threads(4)
-    device = torch.device(f'{args.device}:{args.device_id}')
+    device = torch.device(f'{args.device}:{args.device_id}') if args.device == "cuda" else torch.device("cpu")
 
     import wandb
     #wandb.login(key="7fd30ee0915aa367ca41345b56bd4fba756ca55a")

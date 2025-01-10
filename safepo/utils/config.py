@@ -175,6 +175,9 @@ def single_agent_args():
         {"name": "--pid-kp", "type": float, "default": 0.1, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-ki", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-kd", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
+        {"name": "--reset-idm-prob", "type": float, "default": 1e-4, "help": "learning rate of lagrangian multiplier"},
+        {"name": "--idm-lr", "type": float, "default": 1e-5, "help": "risk learning rate finetuning"},
+        {"name": "--idm-batch-size", "type": int, "default": 256, "help": "Fear radius for binary classifier risk"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

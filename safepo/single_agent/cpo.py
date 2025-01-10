@@ -37,7 +37,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from safepo.common.buffer import VectorizedOnPolicyBuffer
 from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
 from safepo.common.logger import EpochLogger
-from safepo.common.model import ActorVCritic
+from safepo.common.model import ActorVCritic, IDM
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
 from src.models.risk_models import *
 from src.datasets.risk_datasets import *
@@ -68,6 +68,13 @@ isaac_gym_specific_cfg = {
     'max_grad_norm': 1.0,
     'use_critic_norm': False,
 }
+
+
+
+
+
+
+
 
 
 def get_flat_params_from(model: torch.nn.Module) -> torch.Tensor:
@@ -161,6 +168,10 @@ def fvp(
 
     return flat_grad_grad_kl + params * 0.1
 
+# Function to reset model weights
+def reset_weights(m):
+    if hasattr(m, 'reset_parameters'):
+        m.reset_parameters()
 
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
@@ -209,6 +220,11 @@ def main(args, cfg_env=None):
         use_risk=args.use_risk,
         risk_size=risk_size,
     ).to(device)
+
+    idm = IDM(obs_space.shape[0], act_space.shape[0], hidden_sizes=config["hidden_sizes"])
+    idm_optimizer = torch.optim.Adam(idm.parameters(), lr=args.idm_lr)
+    idm_buffer = ReplayBuffer(args.total_steps, obs_space.shape[0])
+
     reward_critic_optimizer = torch.optim.Adam(
         policy.reward_critic.parameters(), lr=1e-3
     )
@@ -294,10 +310,20 @@ def main(args, cfg_env=None):
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
+
             next_obs, reward, cost, terminated, truncated = (
                 torch.as_tensor(x, dtype=torch.float32, device=device)
                 for x in (next_obs, reward, cost, terminated, truncated)
             )
+
+            idm_in = torch.cat([obs, next_obs], axis=-1)
+            idm_buffer.add(idm_in, act, None, None, None, None, None, None)
+
+
+            ## Reward will actually be the prediction error of the idm 
+            # print(act.size(), idm(idm_in).size())
+            reward = torch.norm(idm(idm_in) - act, dim=-1).detach()
+
             if args.use_risk and args.fine_tune_risk:
                 f_next_obs = next_obs.unsqueeze(0).to("cpu") if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0).to("cpu")], axis=0)
                 f_costs = cost.unsqueeze(0).to("cpu") if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0).to("cpu")], axis=0)
@@ -315,6 +341,23 @@ def main(args, cfg_env=None):
                 #writer.add_scalar("risk/risk_loss", risk_loss, global_step)
 
             global_step += args.num_envs 
+
+
+            if np.random.random() < args.reset_idm_prob:
+                idm.apply(reset_weights)
+
+
+            ## Train IDM model 
+            idm_data = idm_buffer.sample(args.idm_batch_size)
+            pred_act = idm(idm_data["obs"].to(device))
+            idm_loss = nn.functional.mse_loss(pred_act, idm_data["next_obs"].to(device))
+            idm_optimizer.zero_grad()
+            idm_loss.backward()
+            idm_optimizer.step()
+            logger.store(**{"idm/idm_loss": idm_loss.item()})
+
+
+
             if "final_observation" in info:
                 info["final_observation"] = np.array(
                     [
@@ -687,6 +730,8 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpCost")
                 logger.log_tabular("Metrics/EvalEpLen")
                 logger.log_tabular("Metrics/EvalTotalCost")
+            
+            logger.log_tabular("idm/idm_loss")
 
             logger.log_tabular("Train/Epoch", epoch + 1)
             logger.log_tabular("Train/TotalSteps", (epoch + 1) * args.steps_per_epoch)

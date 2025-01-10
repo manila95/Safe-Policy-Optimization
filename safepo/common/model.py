@@ -123,6 +123,33 @@ class Actor(nn.Module):
         return Normal(mean, std)
 
 
+class IDM(nn.Module):
+    """
+    Critic network for value-based reinforcement learning.
+
+    This class represents a critic network that estimates the value function for input observations.
+
+    Args:
+        obs_dim (int): Dimensionality of the observation space.
+
+    Attributes:
+        critic (nn.Sequential): MLP network representing the critic function.
+
+    Example:
+        obs_dim = 10
+        critic = VCritic(obs_dim)
+        observation = torch.randn(1, obs_dim)
+        value_estimate = critic(observation)
+    """
+
+    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+        super().__init__()
+        self.idm = build_mlp_network([obs_dim*2]+hidden_sizes+[act_dim])
+
+    def forward(self, obs, risk=None):
+        return torch.squeeze(self.idm(obs), -1)
+
+
 class VCritic(nn.Module):
     """
     Critic network for value-based reinforcement learning.

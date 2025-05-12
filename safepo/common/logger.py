@@ -371,3 +371,9 @@ class EpochLogger(Logger):
         if key not in self.log_headers:
             return 0.0
         return np.mean(self.epoch_dict[key])
+
+    def get_tabular_dict(self):
+        """
+        Returns a dictionary of the most recently logged tabular values.
+        """
+        return {k: v for k, v in zip(self.log_headers, self.log_current_row)}

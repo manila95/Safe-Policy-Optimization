@@ -214,7 +214,7 @@ def create_value_scatter_plot(
     plt.title(f'{title}\nPearson: {corr["pearson_corr"]:.3f}, Spearman: {corr["spearman_corr"]:.3f}')
     plt.xlabel('Monte Carlo Returns')
     plt.ylabel('Predicted Values')
-    plt.legend()
+    # plt.legend()
     
     return fig
 

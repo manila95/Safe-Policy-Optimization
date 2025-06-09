@@ -27,7 +27,7 @@ from safepo.utils.util import check, init
 from safepo.utils.util import get_shape_from_obs_space
 
 
-def build_mlp_network(sizes):
+def build_mlp_network(sizes, use_layer_norm=False):
     """
     Build a multi-layer perceptron (MLP) neural network.
 
@@ -35,6 +35,7 @@ def build_mlp_network(sizes):
 
     Args:
         sizes (list of int): List of integers representing the sizes of each layer in the network.
+        use_layer_norm (bool): Whether to use layer normalization after each linear layer.
 
     Returns:
         nn.Sequential: An instance of PyTorch's Sequential module representing the constructed MLP.
@@ -44,7 +45,10 @@ def build_mlp_network(sizes):
         act = nn.Tanh if j < len(sizes) - 2 else nn.Identity
         affine_layer = nn.Linear(sizes[j], sizes[j + 1])
         nn.init.kaiming_uniform_(affine_layer.weight, a=np.sqrt(5))
-        layers += [affine_layer, act()]
+        layers += [affine_layer]
+        if use_layer_norm and j < len(sizes) - 2:
+            layers += [nn.LayerNorm(sizes[j + 1])]
+        layers += [act()]
     return nn.Sequential(*layers)
 
 
@@ -61,37 +65,48 @@ class RiskEst(nn.Module):
 
 
 class RiskNet(nn.Module):
-    def __init__(self, sizes, risk_size):
+    def __init__(self, sizes, risk_size, use_layer_norm=False):
         super().__init__()
         self.affine_obs = nn.Linear(sizes[0], sizes[1])
         self.affine_risk = nn.Linear(risk_size, 12)
         self.activation = nn.Tanh()
+        self.use_layer_norm = use_layer_norm
+
+        if use_layer_norm:
+            self.obs_norm = nn.LayerNorm(sizes[1])
+            self.risk_norm = nn.LayerNorm(12)
 
         sizes[1] += 12
-        self.rest = build_mlp_network(sizes[1:])
+        self.rest = build_mlp_network(sizes[1:], use_layer_norm=use_layer_norm)
 
     def forward(self, x, risk):
-        # print(risk.size())
         obs = self.activation(self.affine_obs(x))
         risk = self.activation(self.affine_risk(risk))
+        
+        if self.use_layer_norm:
+            obs = self.obs_norm(obs)
+            risk = self.risk_norm(risk)
+            
         x = torch.cat([obs, risk], axis=-1)
         return self.rest(x)
 
 
-def build_risk_mlp_network(sizes, risk_size):
+def build_risk_mlp_network(sizes, risk_size, use_layer_norm=False):
     """
-    Build a multi-layer perceptron (MLP) neural network.
+    Build a multi-layer perceptron (MLP) neural network with risk information.
 
-    This function constructs an MLP network with the specified layer sizes and activation functions.
+    This function constructs an MLP network with the specified layer sizes and activation functions,
+    incorporating risk information into the network.
 
     Args:
         sizes (list of int): List of integers representing the sizes of each layer in the network.
+        risk_size (int): Size of the risk information input.
+        use_layer_norm (bool): Whether to use layer normalization after each linear layer.
 
     Returns:
-        nn.Sequential: An instance of PyTorch's Sequential module representing the constructed MLP.
+        RiskNet: An instance of the RiskNet module representing the constructed MLP with risk information.
     """
-
-    return RiskNet(sizes, risk_size)
+    return RiskNet(sizes, risk_size, use_layer_norm=use_layer_norm)
 
 
 class Actor(nn.Module):
@@ -103,6 +118,10 @@ class Actor(nn.Module):
     Args:
         obs_dim (int): Dimensionality of the observation space.
         act_dim (int): Dimensionality of the action space.
+        hidden_sizes (list): List of hidden layer sizes.
+        use_risk (bool): Whether to use risk information.
+        risk_size (int): Size of risk information.
+        use_layer_norm (bool): Whether to use layer normalization.
 
     Attributes:
         mean (nn.Sequential): MLP network representing the mean of the action distribution.
@@ -116,14 +135,13 @@ class Actor(nn.Module):
         action_distribution = actor(observation)
     """
 
-    def __init__(self, obs_dim: int, act_dim: int, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+    def __init__(self, obs_dim: int, act_dim: int, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, use_layer_norm=False):
         super().__init__()
         self.use_risk = use_risk
-        # print(use_risk)
         if use_risk:
-            self.mean = build_risk_mlp_network([obs_dim]+hidden_sizes+[act_dim], risk_size)
+            self.mean = build_risk_mlp_network([obs_dim]+hidden_sizes+[act_dim], risk_size, use_layer_norm=use_layer_norm)
         else:
-            self.mean = build_mlp_network([obs_dim]+hidden_sizes+[act_dim])
+            self.mean = build_mlp_network([obs_dim]+hidden_sizes+[act_dim], use_layer_norm=use_layer_norm)
         self.log_std = nn.Parameter(torch.zeros(act_dim), requires_grad=True)
 
     def forward(self, obs: torch.Tensor, risk=None):
@@ -143,6 +161,10 @@ class VCritic(nn.Module):
 
     Args:
         obs_dim (int): Dimensionality of the observation space.
+        hidden_sizes (list): List of hidden layer sizes.
+        use_risk (bool): Whether to use risk information.
+        risk_size (int): Size of risk information.
+        use_layer_norm (bool): Whether to use layer normalization.
 
     Attributes:
         critic (nn.Sequential): MLP network representing the critic function.
@@ -154,13 +176,13 @@ class VCritic(nn.Module):
         value_estimate = critic(observation)
     """
 
-    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, use_layer_norm=False):
         super().__init__()
         self.use_risk = use_risk
         if self.use_risk:
             self.critic = build_risk_mlp_network([obs_dim]+hidden_sizes+[1], risk_size)
         else:
-            self.critic = build_mlp_network([obs_dim]+hidden_sizes+[1])
+            self.critic = build_mlp_network([obs_dim]+hidden_sizes+[1], use_layer_norm=use_layer_norm)
 
     def forward(self, obs, risk=None):
         if self.use_risk:
@@ -179,6 +201,11 @@ class ActorVCritic(nn.Module):
     Args:
         obs_dim (int): Dimensionality of the observation space.
         act_dim (int): Dimensionality of the action space.
+        hidden_sizes (list): List of hidden layer sizes.
+        use_risk (bool): Whether to use risk information.
+        risk_size (int): Size of risk information.
+        use_actor_layer_norm (bool): Whether to use layer normalization in the actor network.
+        use_critic_layer_norm (bool): Whether to use layer normalization in the critic networks.
 
     Example:
         obs_dim = 10
@@ -189,12 +216,16 @@ class ActorVCritic(nn.Module):
         value_estimate = actor_critic.get_value(observation)
     """
 
-    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, 
+                 use_actor_layer_norm=False, use_critic_layer_norm=False):
         super().__init__()
         self.use_risk = use_risk
-        self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
-        self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
-        self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+        self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, 
+                                    use_layer_norm=use_critic_layer_norm)
+        self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, 
+                                  use_layer_norm=use_critic_layer_norm)
+        self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, 
+                          use_layer_norm=use_actor_layer_norm)
 
     def get_value(self, obs, risk=None):
         """

@@ -158,8 +158,6 @@ def single_agent_args():
         {"name": "--device-id", "type": int, "default": 0, "help": "The device id to run the model on"},
         {"name": "--write-terminal", "type": lambda x: bool(strtobool(x)), "default": True, "help": "Toggles terminal logging"},
         {"name": "--headless", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Toggles headless mode"},
-        # {"name": "--total-steps", "type": int, "default": 10000000, "help": "Total timesteps of the experiments"},
-        # {"name": "--steps-per-epoch", "type": int, "default": 20000, "help": "The number of steps to run in each environment per policy rollout"},
         {"name": "--randomize", "type": bool, "default": False, "help": "Wheather to randomize the environments' initial states"},
         {"name": "--cost-limit", "type": float, "default": 25.0, "help": "cost_lim"},
         {"name": "--lagrangian-multiplier-init", "type": float, "default": 0.001, "help": "initial value of lagrangian multiplier"},
@@ -186,17 +184,16 @@ def single_agent_args():
         {"name": "--num-risk-samples", "type": int, "default": 30000, "help": "Total timesteps of the experiments"},
         {"name": "--total-steps", "type": int, "default": 10000000, "help": "Total timesteps of the experiments"},
         {"name": "--steps-per-epoch", "type": int, "default": 20000, "help": "The number of steps to run in each environment per policy rollout"},
-        # {"name": "--randomize", "type": bool, "default": False, "help": "Wheather to randomize the environments' initial states"},
-        # {"name": "--cost-limit", "type": float, "default": 25.0, "help": "cost_lim"},
         {"name": "--max-limit", "type": float, "default": 1.0, "help": "cost_lim"},
         {"name": "--min-limit", "type": float, "default": 0.1, "help": "cost_lim"},
         {"name": "--target-kl", "type": float, "default": 0.01, "help": "target kl for cpo"},
-        # {"name": "--lagrangian-multiplier-init", "type": float, "default": 0.001, "help": "initial value of lagrangian multiplier"},
-        # {"name": "--lagrangian-multiplier-lr", "type": float, "default": 0.035, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-kp", "type": float, "default": 0.1, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-ki", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-kd", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
         {"name": "--cpo-step-fraction", "type": float, "default": 0.8, "help": "learning rate of lagrangian multiplier"},
+        {"name": "--use-actor-layer-norm", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use layer normalization in the actor network"},
+        {"name": "--use-critic-layer-norm", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use layer normalization in the critic networks"},
+        {"name": "--sam-rho", "type": float, "default": 0.05, "help": "SAM perturbation radius"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
@@ -248,6 +245,7 @@ def multi_agent_args(algo):
         {"name": "--total-steps", "type": int, "default": None, "help": "Total timesteps of the experiments"},
         {"name": "--num-envs", "type": int, "default": None, "help": "The number of parallel game environments"},
         {"name": "--randomize", "type": bool, "default": False, "help": "Wheather to randomize the environments' initial states"},
+        {"name": "--sam-rho", "type": float, "default": 0.05, "help": "SAM perturbation radius"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

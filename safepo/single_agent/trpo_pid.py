@@ -42,9 +42,9 @@ from safepo.common.lagrange import PIDLagrangian as Lagrange
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
-from src.models.risk_models import *
-from src.datasets.risk_datasets import *
-from src.utils import * 
+# from src.models.risk_models import *
+# from src.datasets.risk_datasets import *
+# from src.utils import * 
 
 CONJUGATE_GRADIENT_ITERS=15
 TRPO_SEARCHING_STEPS=15
@@ -668,8 +668,8 @@ def main(args, cfg_env=None):
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
     import wandb
-    run = wandb.init(config=vars(args), entity="kaustubh_umontreal",
-                project="risk_aware_exploration",
+    run = wandb.init(config=vars(args), entity="kaustubh95",
+                project="conservatism_in_rl",
                 monitor_gym=True,
                 sync_tensorboard=True, save_code=True)
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")

@@ -71,23 +71,6 @@ isaac_gym_specific_cfg = {
     'use_layer_norm': False,
 }
 
-def sam_gradients(model, grads, cost_closure, reward_closure, lagrange_closure, rho=0.05):
-    
-    params_old = get_flat_params_from(model)
-    loss = cost_closure()
-    loss.backward(retain_graph=True)
-    grad_norm = self._grad_norm()
-    scale = rho / (grad_norm + 1e-12)
-
-    perturbations = []
-    for param in model.parameters():
-        if param.grad is None:
-            continue
-        e_w = param.grad * scale.to(param)
-        perturbations.append(e_w)
-        param.data.add_(e_w)
-    
-    loss_perturbed = lagrange_closure()
 
 
 def get_flat_params_from(model: torch.nn.Module) -> torch.Tensor:
@@ -184,7 +167,7 @@ def fvp(
     return flat_grad_grad_kl + params * 0.1
 
 
-def compute_sam_gradients(policy, data, advantage, rho=0.05):
+def compute_sam_gradients(policy, data, advantage, rho=0.05, use_hvp=False):
     """Compute Sharpness Aware Minimization gradients.
     
     Args:
@@ -205,8 +188,8 @@ def compute_sam_gradients(policy, data, advantage, rho=0.05):
     
     # Compute gradients
     base_loss.backward(retain_graph=True)
-    grads = get_flat_gradients_from(policy.actor)
-    grad_norm = torch.norm(grads)
+    base_grads = get_flat_gradients_from(policy.actor)
+    grad_norm = torch.norm(base_grads)
     
     # Compute perturbation
     scale = rho / (grad_norm + 1e-12)
@@ -228,6 +211,11 @@ def compute_sam_gradients(policy, data, advantage, rho=0.05):
     
     # Get gradients at perturbed point
     sam_grads = get_flat_gradients_from(policy.actor)
+
+    if use_hvp:
+        # Compute HVP: (g_perturbed - g_base) / scale
+        hvp = (sam_grads - base_grads) / scale
+        sam_grads = base_grads + hvp
     
     # Restore original parameters
     for param, e_w in zip(policy.actor.parameters(), perturbed_params):
@@ -238,7 +226,7 @@ def compute_sam_gradients(policy, data, advantage, rho=0.05):
     return sam_grads, perturbed_params
 
 
-def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):
+def compute_sam_gradients_critic(critic, data, target_values, rho=0.05, use_hvp=False):
     """Compute Sharpness Aware Minimization gradients for critic.
     
     Args:
@@ -265,10 +253,12 @@ def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):
     # Compute gradients
     base_loss.backward(retain_graph=True)
     
-    # Get gradients and compute norm
+    # Store base gradients for HVP computation
+    base_grads = {}
     grad_norm = 0.0
-    for param in critic.parameters():
+    for name, param in critic.named_parameters():
         if param.grad is not None:
+            base_grads[name] = param.grad.clone()
             grad_norm += param.grad.data.norm(2).item() ** 2
     grad_norm = grad_norm ** 0.5
     
@@ -294,6 +284,13 @@ def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):
         if param.grad is not None:
             sam_grads[name] = param.grad.clone()
     
+    if use_hvp:
+        # Compute HVP: (g_perturbed - g_base) / scale
+        for name in sam_grads:
+            if name in base_grads:
+                hvp = (sam_grads[name] - base_grads[name]) / scale
+                sam_grads[name] = base_grads[name] + hvp
+
     # Restore original parameters
     for param, orig_param in zip(critic.parameters(), original_params):
         if param.requires_grad:
@@ -685,7 +682,7 @@ def main(args, cfg_env=None):
             loss_before = -(ratio * advantage).mean().item()
         
         # Get SAM gradients at perturbed point
-        sam_grads, perturbed_params = compute_sam_gradients(policy, data, advantage, rho=args.sam_rho)
+        sam_grads, perturbed_params = compute_sam_gradients(policy, data, advantage, rho=args.sam_rho, use_hvp=args.use_hvp)
         
         # Use SAM gradients for TRPO update
         x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, -sam_grads, CONJUGATE_GRADIENT_ITERS)
@@ -807,7 +804,8 @@ def main(args, cfg_env=None):
                     policy.cost_critic, 
                     {"obs": obs_b, "risk": risk_b}, 
                     target_value_c_b,
-                    rho=args.sam_rho
+                    rho=args.sam_rho,
+                    use_hvp=args.use_hvp
                 )
                 for name, param in policy.cost_critic.named_parameters():
                     if name in sam_grads_c:

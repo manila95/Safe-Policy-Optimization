@@ -321,9 +321,9 @@ def main(args, cfg_env=None):
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_mujoco_env(
-            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
+            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed, saute=args.saute
         )
-        eval_env, _, _ = make_sa_mujoco_env(args, num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = make_sa_mujoco_env(args, num_envs=1, env_id=args.task, seed=None, saute=args.saute)
         config = default_cfg
 
     else:
@@ -678,17 +678,28 @@ def main(args, cfg_env=None):
         advantage /= (lagrange.lagrangian_multiplier + 1)
         
         # Compute initial loss before any updates
-        with torch.no_grad():
-            temp_distribution = policy.actor(data["obs"], data["risk"])
-            log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
-            ratio = torch.exp(log_prob - data["log_prob"])
-            loss_before = -(ratio * advantage).mean().item()
+        # with torch.no_grad():
+        temp_distribution = policy.actor(data["obs"], data["risk"])
+        log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+        ratio = torch.exp(log_prob - data["log_prob"])
+        loss_pi = -(ratio * advantage).mean()
+        loss_before = loss_pi.item()
+
+        if args.use_sam:
+            # Get SAM gradients at perturbed point
+            sam_grads, perturbed_params = compute_sam_gradients(policy, data, advantage, rho=args.sam_rho)
+            # x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, -sam_grads, CONJUGATE_GRADIENT_ITERS)
+            grads = -sam_grads
+        else:
+            loss_before = loss_pi.item()
+            old_distribution = policy.actor(data["obs"], data["risk"])
+            loss_pi.backward()
+            grads = -get_flat_gradients_from(policy.actor)
+
         
-        # Get SAM gradients at perturbed point
-        sam_grads, perturbed_params = compute_sam_gradients(policy, data, advantage, rho=args.sam_rho)
+        x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, grads, CONJUGATE_GRADIENT_ITERS)
         
         # Use SAM gradients for TRPO update
-        x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, -sam_grads, CONJUGATE_GRADIENT_ITERS)
         assert torch.isfinite(x).all(), "x is not finite"
         xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
         assert xHx.item() >= 0, "xHx is negative"
@@ -696,9 +707,9 @@ def main(args, cfg_env=None):
         step_direction = x * alpha
         assert torch.isfinite(step_direction).all(), "step_direction is not finite"
 
-        step_frac = 1.0
+        step_frac = 1.0 
         # Change expected objective function gradient = expected_imrpove best this moment
-        expected_improve = sam_grads.dot(step_direction)
+        expected_improve = grads.dot(step_direction)
 
         final_kl = 0.0
 
@@ -756,7 +767,7 @@ def main(args, cfg_env=None):
                 "Misc/Alpha": alpha.item(),
                 "Misc/FinalStepNorm": torch.norm(step_direction).mean().item(),
                 "Misc/xHx": xHx.item(),
-                "Misc/gradient_norm": torch.norm(sam_grads).mean().item(),
+                "Misc/gradient_norm": torch.norm(grads).mean().item(),
                 "Misc/H_inv_g": x.norm().item(),
                 "Misc/AcceptanceStep": acceptance_step,
                 "Loss/Loss_actor": loss_pi.mean().item(),
@@ -785,37 +796,43 @@ def main(args, cfg_env=None):
                 
                 # Update reward critic with SAM
                 reward_critic_optimizer.zero_grad()
-                sam_grads_r, _ = compute_sam_gradients_critic(
-                    policy.reward_critic, 
-                    {"obs": obs_b, "risk": risk_b}, 
-                    target_value_r_b,
-                    rho=args.sam_rho
-                )
-                for name, param in policy.reward_critic.named_parameters():
-                    if name in sam_grads_r:
-                        param.grad = sam_grads_r[name]
-                if config.get("use_critic_norm", True):
-                    for param in policy.reward_critic.parameters():
-                        if param.grad is not None:
-                            param.grad += param * 0.001
+                if args.use_sam:
+                    sam_grads_r, _ = compute_sam_gradients_critic(
+                        policy.reward_critic, 
+                        {"obs": obs_b, "risk": risk_b}, 
+                        target_value_r_b,
+                        rho=args.sam_rho
+                    )
+                    for name, param in policy.reward_critic.named_parameters():
+                        if name in sam_grads_r:
+                            param.grad = sam_grads_r[name]
+                    if config.get("use_critic_norm", True):
+                        for param in policy.reward_critic.parameters():
+                            if param.grad is not None:
+                                param.grad += param * 0.001
+                else:
+                    loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
                 clip_grad_norm_(policy.reward_critic.parameters(), config["max_grad_norm"])
                 reward_critic_optimizer.step()
                 
                 # Update cost critic with SAM
                 cost_critic_optimizer.zero_grad()
-                sam_grads_c, _ = compute_sam_gradients_critic(
-                    policy.cost_critic, 
-                    {"obs": obs_b, "risk": risk_b}, 
-                    target_value_c_b,
-                    rho=args.sam_rho
-                )
-                for name, param in policy.cost_critic.named_parameters():
-                    if name in sam_grads_c:
-                        param.grad = sam_grads_c[name]
-                if config.get("use_critic_norm", True):
-                    for param in policy.cost_critic.parameters():
-                        if param.grad is not None:
-                            param.grad += param * 0.001
+                if args.use_sam:
+                    sam_grads_c, _ = compute_sam_gradients_critic(
+                        policy.cost_critic, 
+                        {"obs": obs_b, "risk": risk_b}, 
+                        target_value_c_b,
+                        rho=args.sam_rho
+                    )
+                    for name, param in policy.cost_critic.named_parameters():
+                        if name in sam_grads_c:
+                            param.grad = sam_grads_c[name]
+                    if config.get("use_critic_norm", True):
+                        for param in policy.cost_critic.parameters():
+                            if param.grad is not None:
+                                param.grad += param * 0.001
+                else:
+                    loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk_b), target_value_c_b)
                 clip_grad_norm_(policy.cost_critic.parameters(), config["max_grad_norm"])
                 cost_critic_optimizer.step()
 

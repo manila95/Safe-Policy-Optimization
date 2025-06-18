@@ -32,7 +32,43 @@ from safety_gymnasium.wrappers import SafeAutoResetWrapper, SafeRescaleAction, S
 from safety_gymnasium.vector.async_vector_env import SafetyAsyncVectorEnv
 from safepo.common.wrappers import ShareSubprocVecEnv, ShareDummyVecEnv, ShareEnv, SafeNormalizeObservation, MultiGoalEnv
 
-def make_sa_mujoco_env(cfg, num_envs: int, env_id: str, seed: int|None = None):
+
+
+import gymnasium as gym
+import numpy as np
+
+class EpisodicCostWrapper(gym.ObservationWrapper):
+    """Adds the cumulative episode cost to the observation by appending it to the observation array."""
+    
+    def __init__(self, env):
+        super().__init__(env)
+        # Extend observation space by adding one dimension for episodic cost
+        self.observation_space = gym.spaces.Box(
+            low=np.append(self.observation_space.low, -np.inf),
+            high=np.append(self.observation_space.high, np.inf),
+            dtype=np.float32
+        )
+        self._episodic_cost = 0.0
+        
+    def observation(self, obs):
+        # Convert to list, append cost, and convert back to numpy array
+        obs = np.append(obs, self._episodic_cost)
+        return obs
+        
+    def step(self, action):
+        obs, reward, cost, terminated, truncated, info = self.env.step(action)
+        self._episodic_cost += cost
+        # Return augmented observation
+        return self.observation(obs), reward, cost, terminated, truncated, info
+        
+    def reset(self, **kwargs):
+        self._episodic_cost = 0.0
+        obs, info = self.env.reset(**kwargs)
+        # Return augmented observation
+        return self.observation(obs), info
+
+
+def make_sa_mujoco_env(cfg, num_envs: int, env_id: str, seed: int|None = None, saute: bool = False):
     """
     Creates and wraps an environment based on the specified parameters.
 
@@ -60,10 +96,13 @@ def make_sa_mujoco_env(cfg, num_envs: int, env_id: str, seed: int|None = None):
             """Creates an environment that can enable or disable the environment checker."""
             env = safety_gymnasium.make(env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
             env = SafeRescaleAction(env, -1.0, 1.0)
+            if saute:
+                env = EpisodicCostWrapper(env)
             return env
         env_fns = [create_env for _ in range(num_envs)]
         env = SafetyAsyncVectorEnv(env_fns)
         env = SafeNormalizeObservation(env)
+
         env.reset(seed=seed)
         obs_space = env.single_observation_space
         act_space = env.single_action_space
@@ -76,7 +115,8 @@ def make_sa_mujoco_env(cfg, num_envs: int, env_id: str, seed: int|None = None):
         env = SafeRescaleAction(env, -1.0, 1.0)
         env = SafeNormalizeObservation(env)
         env = SafeUnsqueeze(env)
-    
+        if saute:
+            env = EpisodicCostWrapper(env)
     return env, obs_space, act_space
 
 def make_sa_isaac_env(args, cfg, sim_params):

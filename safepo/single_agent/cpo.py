@@ -132,6 +132,124 @@ def get_flat_gradients_from(model: torch.nn.Module) -> torch.Tensor:
     assert grads, "No gradients were found in model parameters."
     return torch.cat(grads)
 
+def compute_sam_gradients(policy, data, advantage, rho=0.05):
+    """Compute Sharpness Aware Minimization gradients.
+    
+    Args:
+        policy: The policy network
+        data: Dictionary containing observations, actions, etc.
+        advantage: Advantage values
+        rho: Perturbation radius for SAM
+        
+    Returns:
+        sam_grads: The gradients computed at the perturbed point
+        perturbed_params: The perturbed parameters
+    """
+    # First compute the base loss and gradients
+    temp_distribution = policy.actor(data["obs"], data["risk"])
+    log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+    ratio = torch.exp(log_prob - data["log_prob"])
+    base_loss = -(ratio * advantage).mean()
+    
+    # Compute gradients
+    base_loss.backward(retain_graph=True)
+    grads = get_flat_gradients_from(policy.actor)
+    grad_norm = torch.norm(grads)
+    
+    # Compute perturbation
+    scale = rho / (grad_norm + 1e-12)
+    perturbed_params = []
+    for param in policy.actor.parameters():
+        if param.grad is None:
+            continue
+        e_w = param.grad * scale.to(param)
+        perturbed_params.append(e_w)
+        param.data.add_(e_w)
+    
+    # Compute loss and gradients at perturbed point
+    policy.actor.zero_grad()
+    temp_distribution = policy.actor(data["obs"], data["risk"])
+    log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+    ratio = torch.exp(log_prob - data["log_prob"])
+    perturbed_loss = -(ratio * advantage).mean()
+    perturbed_loss.backward()
+    
+    # Get gradients at perturbed point
+    sam_grads = get_flat_gradients_from(policy.actor)
+    
+    # Restore original parameters
+    for param, e_w in zip(policy.actor.parameters(), perturbed_params):
+        if param.grad is None:
+            continue
+        param.data.sub_(e_w)
+    
+    return sam_grads, perturbed_params
+
+
+def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):
+    """Compute Sharpness Aware Minimization gradients for critic.
+    
+    Args:
+        critic: The critic network (reward or cost)
+        data: Dictionary containing observations, risk values
+        target_values: Target values for the critic
+        rho: Perturbation radius for SAM
+        
+    Returns:
+        sam_grads: Dictionary mapping parameter names to their SAM gradients
+        perturbed_params: The perturbed parameters
+    """
+    # Store original parameters
+    original_params = []
+    for param in critic.parameters():
+        if param.requires_grad:
+            original_params.append(param.data.clone())
+    
+    # First compute the base loss and gradients
+    critic.zero_grad()
+    value_pred = critic(data["obs"], data["risk"])
+    base_loss = nn.functional.mse_loss(value_pred, target_values)
+    
+    # Compute gradients
+    base_loss.backward(retain_graph=True)
+    
+    # Get gradients and compute norm
+    grad_norm = 0.0
+    for param in critic.parameters():
+        if param.grad is not None:
+            grad_norm += param.grad.data.norm(2).item() ** 2
+    grad_norm = grad_norm ** 0.5
+    
+    # Compute perturbation
+    scale = rho / (grad_norm + 1e-12)
+    perturbed_params = []
+    for param in critic.parameters():
+        if param.grad is None:
+            continue
+        e_w = param.grad * scale
+        perturbed_params.append(e_w)
+        param.data.add_(e_w)
+    
+    # Compute loss and gradients at perturbed point
+    critic.zero_grad()
+    value_pred = critic(data["obs"], data["risk"])
+    perturbed_loss = nn.functional.mse_loss(value_pred, target_values)
+    perturbed_loss.backward()
+    
+    # Get gradients at perturbed point
+    sam_grads = {}
+    for name, param in critic.named_parameters():
+        if param.grad is not None:
+            sam_grads[name] = param.grad.clone()
+    
+    # Restore original parameters
+    for param, orig_param in zip(critic.parameters(), original_params):
+        if param.requires_grad:
+            param.data.copy_(orig_param)
+    
+    return sam_grads, perturbed_params
+
+
 def fvp(
     params: torch.Tensor,
     policy: ActorVCritic,
@@ -173,7 +291,7 @@ def main(args, cfg_env=None):
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_mujoco_env(
-            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
+            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed, saute=args.saute
         )
         # eval_env, obs_space, act_space = make_sa_mujoco_env(
         #     args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
@@ -478,14 +596,18 @@ def main(args, cfg_env=None):
         loss_pi_r = -(ratio * data["adv_r"]).mean()
         loss_reward_before = loss_pi_r.item()
         old_distribution = policy.actor(data["obs"], data["risk"])
-        loss_pi_r.backward()
-
-        grads = -get_flat_gradients_from(policy.actor)
+        if args.use_sam:
+            sam_grads, perturbed_params = compute_sam_gradients(policy, data, data["adv_r"], rho=args.sam_rho)
+            grads = -sam_grads
+        else:
+            loss_pi_r.backward()
+            grads = -get_flat_gradients_from(policy.actor)
+        
         x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, grads, CONJUGATE_GRADIENT_ITERS)
         assert torch.isfinite(x).all(), "x is not finite"
         xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
         assert xHx.item() >= 0, "xHx is negative"
-        alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
+        alpha = torch.sqrt(2 * args.target_kl / (xHx + 1e-8))
 
         policy.actor.zero_grad()
         temp_distribution = policy.actor(data["obs"], data["risk"])
@@ -494,9 +616,13 @@ def main(args, cfg_env=None):
         loss_pi_c = (ratio * data["adv_c"]).mean()
         loss_cost_before = loss_pi_c.item()
 
-        loss_pi_c.backward()
+        if args.use_sam:
+            sam_grads, perturbed_params = compute_sam_gradients(policy, data, data["adv_c"], rho=args.sam_rho)
+            b_grads = -sam_grads
+        else:
+            loss_pi_c.backward()
+            b_grads = get_flat_gradients_from(policy.actor)
 
-        b_grads = get_flat_gradients_from(policy.actor)
         ep_costs = logger.get_stats("Metrics/EpCost") - args.cost_limit
 
         p = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, b_grads, CONJUGATE_GRADIENT_ITERS)
@@ -514,7 +640,7 @@ def main(args, cfg_env=None):
             assert torch.isfinite(s).all(), "s is not finite"
 
             A = q - r**2 / (s + 1e-8)
-            B = 2 * config['target_kl'] - ep_costs**2 / (s + 1e-8)
+            B = 2 * args.target_kl - ep_costs**2 / (s + 1e-8)
 
             if ep_costs < 0 and B < 0:
                 optim_case = 3
@@ -528,7 +654,7 @@ def main(args, cfg_env=None):
                 logger.log("Alert! Attempting infeasible recovery!", "red")
 
         if optim_case in (3, 4):
-            alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
+            alpha = torch.sqrt(2 * args.target_kl / (xHx + 1e-8))
             nu_star = torch.zeros(1)
             lambda_star = 1 / (alpha + 1e-8)
             step_direction = alpha * x
@@ -542,7 +668,7 @@ def main(args, cfg_env=None):
                 return torch.clamp(data, low, high)
 
             lambda_a = torch.sqrt(A / B)
-            lambda_b = torch.sqrt(q / (2 * config['target_kl']))
+            lambda_b = torch.sqrt(q / (2 * args.target_kl))
             r_num = r.item()
             eps_cost = ep_costs + 1e-8
             if ep_costs < 0:
@@ -564,7 +690,7 @@ def main(args, cfg_env=None):
                 return -0.5 * (A / (lam + 1e-8) + B * lam) - r * ep_costs / (s + 1e-8)
 
             def f_b(lam: torch.Tensor) -> torch.Tensor:
-                return -0.5 * (q / (lam + 1e-8) + 2 * config['target_kl'] * lam)
+                return -0.5 * (q / (lam + 1e-8) + 2 * args.target_kl * lam)
 
             lambda_star = (
                 lambda_a_star
@@ -578,7 +704,7 @@ def main(args, cfg_env=None):
 
         else:
             lambda_star = torch.zeros(1)
-            nu_star = torch.sqrt(2 * config['target_kl'] / (s + 1e-8))
+            nu_star = torch.sqrt(2 * args.target_kl / (s + 1e-8))
             step_direction = -nu_star * p
 
         step_frac = 1.0
@@ -623,7 +749,7 @@ def main(args, cfg_env=None):
                 logger.log("INFO: did not improve improve <0")
             elif loss_cost_diff > max(-ep_costs, 0):
                 logger.log(f"INFO: no improve {loss_cost_diff} > {max(-ep_costs, 0)}")
-            elif kl > config["target_kl"]:
+            elif kl > args.target_kl:
                 logger.log(f"INFO: violated KL constraint {kl} at step {step + 1}.")
             else:
                 logger.log(f"Accept step at i={step + 1}")
@@ -669,18 +795,62 @@ def main(args, cfg_env=None):
             ) in dataloader:
                 risk_b = risk_b if args.use_risk else None 
                 reward_critic_optimizer.zero_grad()
-                loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
+                if args.use_sam:
+                    sam_grads_r, _ = compute_sam_gradients_critic(
+                        policy.reward_critic, 
+                        {"obs": obs_b, "risk": risk_b}, 
+                        target_value_r_b,
+                        rho=args.sam_rho
+                    )
+                    for name, param in policy.reward_critic.named_parameters():
+                        if name in sam_grads_r:
+                            param.grad = sam_grads_r[name]
+                    if config.get("use_critic_norm", True):
+                        for param in policy.reward_critic.parameters():
+                            if param.grad is not None:
+                                param.grad += param * 0.001
+                    
+                else:
+                    loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
+
                 cost_critic_optimizer.zero_grad()
-                loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk_b), target_value_c_b)
-                if config.get("use_critic_norm", True):
-                    for param in policy.reward_critic.parameters():
-                        loss_r += param.pow(2).sum() * 0.001
-                    for param in policy.cost_critic.parameters():
-                        loss_c += param.pow(2).sum() * 0.001
-                total_loss = 2*loss_r + loss_c \
-                    if config.get("use_value_coefficient", False) \
-                    else loss_r + loss_c
-                total_loss.backward()
+                if args.use_sam:
+                    sam_grads_c, _ = compute_sam_gradients_critic(
+                        policy.cost_critic, 
+                        {"obs": obs_b, "risk": risk_b}, 
+                        target_value_c_b,
+                        rho=args.sam_rho
+                    )
+                    for name, param in policy.cost_critic.named_parameters():
+                        if name in sam_grads_c:
+                            param.grad = sam_grads_c[name]
+                    if config.get("use_critic_norm", True):
+                        for param in policy.cost_critic.parameters():
+                            if param.grad is not None:
+                                param.grad += param * 0.001
+                else:
+                    loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk_b), target_value_c_b)
+                # loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk_b), target_value_c_b)
+
+                
+                if not args.use_sam:
+                    if config.get("use_critic_norm", True):
+                        for param in policy.reward_critic.parameters():
+                            loss_r += param.pow(2).sum() * 0.001
+                        for param in policy.cost_critic.parameters():
+                            loss_c += param.pow(2).sum() * 0.001
+                    
+                    total_loss = 2*loss_r + loss_c \
+                        if config.get("use_value_coefficient", False) \
+                        else loss_r + loss_c
+                    total_loss.backward()
+                else:
+                    with torch.no_grad():
+                        value_r = policy.reward_critic(obs_b, risk_b)
+                        value_c = policy.cost_critic(obs_b, risk_b)
+                        loss_r = nn.functional.mse_loss(value_r, target_value_r_b)
+                        loss_c = nn.functional.mse_loss(value_c, target_value_c_b)
+                        
                 clip_grad_norm_(policy.parameters(), config["max_grad_norm"])
                 reward_critic_optimizer.step()
                 cost_critic_optimizer.step()

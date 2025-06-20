@@ -184,7 +184,7 @@ def fvp(
     return flat_grad_grad_kl + params * 0.1
 
 
-def compute_sam_gradients(policy, data, advantage, rho=0.05):
+def compute_sam_gradients(policy, data, advantage, rho=0.05, target_kl=0.01):
     """Compute Sharpness Aware Minimization gradients.
     
     Args:
@@ -207,9 +207,17 @@ def compute_sam_gradients(policy, data, advantage, rho=0.05):
     base_loss.backward(retain_graph=True)
     grads = get_flat_gradients_from(policy.actor)
     grad_norm = torch.norm(grads)
-    
+
+    optimal_rho, optimal_kl = find_optimal_rho_with_while_loop(
+        policy=policy,
+        data=data,
+        advantage=advantage,
+        grads=grads,
+        target_kl=target_kl,
+        max_rho=rho
+    )
     # Compute perturbation
-    scale = rho / (grad_norm + 1e-12)
+    scale = optimal_rho / (grad_norm + 1e-12)
     perturbed_params = []
     for param in policy.actor.parameters():
         if param.grad is None:
@@ -235,10 +243,10 @@ def compute_sam_gradients(policy, data, advantage, rho=0.05):
             continue
         param.data.sub_(e_w)
     
-    return sam_grads, perturbed_params
+    return sam_grads, perturbed_params, optimal_rho, optimal_kl
 
 
-def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):
+def compute_sam_gradients_critic(critic, data, target_values, rho=0.05, target_kl=0.01):
     """Compute Sharpness Aware Minimization gradients for critic.
     
     Args:
@@ -271,7 +279,7 @@ def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):
         if param.grad is not None:
             grad_norm += param.grad.data.norm(2).item() ** 2
     grad_norm = grad_norm ** 0.5
-    
+
     # Compute perturbation
     scale = rho / (grad_norm + 1e-12)
     perturbed_params = []
@@ -300,6 +308,71 @@ def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):
             param.data.copy_(orig_param)
     
     return sam_grads, perturbed_params
+
+
+def find_optimal_rho_with_while_loop(policy, data, advantage, grads, target_kl=0.01, max_rho=0.1, rho_tol=1e-4):
+    """Find optimal rho using while loop that keeps perturbed policy within KL constraint.
+    
+    Args:
+        policy: The policy network
+        data: Dictionary containing observations, actions, etc.
+        advantage: Advantage values
+        grads: Pre-computed gradients (flat tensor)
+        target_kl: Target KL divergence constraint
+        max_rho: Maximum rho value to try
+        rho_tol: Tolerance for rho convergence
+        
+    Returns:
+        optimal_rho: The optimal rho value
+        optimal_kl: The KL divergence achieved
+    """
+    # Store original parameters and distribution
+    original_params = get_flat_params_from(policy.actor)
+    with torch.no_grad():
+        old_distribution = policy.actor(data["obs"], data["risk"])
+    
+    # Compute gradient norm once
+    grad_norm = torch.norm(grads)
+    
+    # Start with max_rho and multiply by 0.8 until it works
+    rho = max_rho
+    optimal_rho = 0.0
+    optimal_kl = 0.0
+    
+    while rho > rho_tol:
+        # Compute perturbation scale
+        scale = rho / (grad_norm + 1e-12)
+        
+        # Apply perturbation using the pre-computed gradients
+        param_idx = 0
+        for param in policy.actor.parameters():
+            if param.grad is None:
+                continue
+            e_w = param.grad * scale.to(param)
+            # perturbed_params.append(e_w)
+            param.data.add_(e_w)
+    
+        
+        # Compute KL divergence
+        with torch.no_grad():
+            current_distribution = policy.actor(data["obs"], data["risk"])
+            kl = torch.distributions.kl.kl_divergence(
+                old_distribution, current_distribution
+            ).mean().item()
+        
+        # Restore original parameters
+        set_param_values_to_model(policy.actor, original_params)
+        
+        # Check if this rho works
+        if kl <= target_kl:
+            optimal_rho = rho
+            optimal_kl = kl
+            break
+        else:
+            # Try a smaller rho
+            rho *= 0.8
+    
+    return optimal_rho, optimal_kl
 
 
 def main(args, cfg_env=None):
@@ -685,7 +758,7 @@ def main(args, cfg_env=None):
             loss_before = -(ratio * advantage).mean().item()
         
         # Get SAM gradients at perturbed point
-        sam_grads, perturbed_params = compute_sam_gradients(policy, data, advantage, rho=args.sam_rho)
+        sam_grads, perturbed_params, optimal_rho, optimal_kl = compute_sam_gradients(policy, data, advantage, rho=args.sam_rho, target_kl=config['target_kl'])
         
         # Use SAM gradients for TRPO update
         x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, -sam_grads, CONJUGATE_GRADIENT_ITERS)
@@ -761,6 +834,8 @@ def main(args, cfg_env=None):
                 "Misc/AcceptanceStep": acceptance_step,
                 "Loss/Loss_actor": loss_pi.mean().item(),
                 "Train/KL": final_kl,
+                "Train/OptimalRho": optimal_rho,
+                "Train/OptimalKL": optimal_kl,
             },
         )
 
@@ -858,6 +933,8 @@ def main(args, cfg_env=None):
             logger.log_tabular("Train/Epoch", epoch + 1)
             logger.log_tabular("Train/TotalSteps", (epoch + 1) * args.steps_per_epoch)
             logger.log_tabular("Train/KL")
+            logger.log_tabular("Train/OptimalRho")
+            logger.log_tabular("Train/OptimalKL")
             logger.log_tabular("Train/LagragianMultiplier", lagrange.lagrangian_multiplier)
             logger.log_tabular("Loss/Loss_reward_critic")
             logger.log_tabular("Loss/Loss_cost_critic")

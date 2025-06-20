@@ -71,24 +71,6 @@ isaac_gym_specific_cfg = {
     'use_layer_norm': False,
 }
 
-def sam_gradients(model, grads, cost_closure, reward_closure, lagrange_closure, rho=0.05):
-    
-    params_old = get_flat_params_from(model)
-    loss = cost_closure()
-    loss.backward(retain_graph=True)
-    grad_norm = self._grad_norm()
-    scale = rho / (grad_norm + 1e-12)
-
-    perturbations = []
-    for param in model.parameters():
-        if param.grad is None:
-            continue
-        e_w = param.grad * scale.to(param)
-        perturbations.append(e_w)
-        param.data.add_(e_w)
-    
-    loss_perturbed = lagrange_closure()
-
 
 def get_flat_params_from(model: torch.nn.Module) -> torch.Tensor:
     flat_params = []
@@ -184,19 +166,134 @@ def fvp(
     return flat_grad_grad_kl + params * 0.1
 
 
-def compute_sam_gradients(policy, data, advantage, rho=0.05):
-    """Compute Sharpness Aware Minimization gradients.
+def compute_kl_constrained_perturbation(policy, data, step_direction, target_kl, max_search_steps=10):
+    """Compute a perturbation that satisfies the KL constraint using line search.
+    
+    Args:
+        policy: The policy network
+        data: Dictionary containing observations, actions, etc.
+        step_direction: The direction to perturb parameters
+        target_kl: Target KL divergence constraint
+        max_search_steps: Maximum number of line search steps
+        
+    Returns:
+        step_frac: The step fraction that satisfies KL constraint
+        final_kl: The final KL divergence achieved
+        accepted_step: Whether a suitable step was found
+    """
+    theta_old = get_flat_params_from(policy.actor)
+    
+    # Store old distribution for KL computation
+    with torch.no_grad():
+        old_distribution = policy.actor(data["obs"], data["risk"])
+    
+    step_frac = 1.0
+    final_kl = 0.0
+    accepted_step = False
+    
+    for step in range(max_search_steps):
+        # Compute perturbed parameters
+        theta_perturbed = theta_old + step_frac * step_direction
+        set_param_values_to_model(policy.actor, theta_perturbed)
+        
+        # Compute KL divergence between old and perturbed policy
+        with torch.no_grad():
+            current_distribution = policy.actor(data["obs"], data["risk"])
+            kl = torch.distributions.kl.kl_divergence(
+                old_distribution, current_distribution
+            ).mean().item()
+        
+        if kl <= target_kl:
+            final_kl = kl
+            accepted_step = True
+            break
+        else:
+            step_frac *= 0.8
+    else:
+        # If no suitable step found, use a very small perturbation
+        step_frac = 0.1
+        theta_perturbed = theta_old + step_frac * step_direction
+        set_param_values_to_model(policy.actor, theta_perturbed)
+        
+        with torch.no_grad():
+            current_distribution = policy.actor(data["obs"], data["risk"])
+            final_kl = torch.distributions.kl.kl_divergence(
+                old_distribution, current_distribution
+            ).mean().item()
+        accepted_step = True
+    
+    return step_frac, final_kl, accepted_step
+
+
+def compute_natural_gradient_direction(fvp, policy, data, grads, target_kl):
+    """Compute the natural gradient direction using conjugate gradients.
+    
+    Args:
+        fvp: Fisher vector product function
+        policy: The policy network
+        data: Dictionary containing observations, actions, etc.
+        grads: The policy gradients
+        target_kl: Target KL divergence for step size computation
+        
+    Returns:
+        step_direction: The natural gradient step direction
+        x: The conjugate gradient solution
+        xHx: The quadratic form x^T H x
+    """
+    x = conjugate_gradients(fvp, policy, data["fvp_obs"], data["fvp_risk"], grads, CONJUGATE_GRADIENT_ITERS)
+    assert torch.isfinite(x).all(), "x is not finite"
+    xHx = torch.dot(x, fvp(x, policy, data["fvp_obs"], data["fvp_risk"]))
+    assert xHx.item() >= 0, "xHx is negative"
+    
+    # Initial step size based on TRPO
+    alpha = torch.sqrt(2 * target_kl / (xHx + 1e-8))
+    step_direction = x * alpha
+    
+    return step_direction, x, xHx
+
+
+def log_gradient_statistics(grads, step_direction, x):
+    """Log gradient statistics for debugging and monitoring.
+    
+    Args:
+        grads: The original policy gradients
+        step_direction: The natural gradient step direction
+        x: The conjugate gradient solution
+        logger: Logger instance for logging
+    """
+    grad_norm = torch.norm(grads)
+    
+    # Compute cosine similarity between natural gradient and original gradient
+    cos_sim = torch.nn.functional.cosine_similarity(x.view(1,-1), grads.view(1,-1))
+    
+    # Compute effective rho as the norm of the step direction
+    effective_rho = torch.norm(step_direction).item()
+
+    # Calculate scale by projecting step_direction onto original gradient direction
+    grad_direction = grads / (grad_norm + 1e-12)  # Normalize gradient
+    scale_along_grad = torch.dot(step_direction, grad_direction)
+
+    return cos_sim, effective_rho, scale_along_grad
+
+
+def compute_sam_gradients(fvp, policy, data, advantage, rho=0.05, target_kl=0.01, max_search_steps=10):
+    """Compute Sharpness Aware Minimization gradients with KL constraint.
     
     Args:
         policy: The policy network
         data: Dictionary containing observations, actions, etc.
         advantage: Advantage values
         rho: Perturbation radius for SAM
+        target_kl: Target KL divergence constraint
+        max_search_steps: Maximum number of line search steps
         
     Returns:
         sam_grads: The gradients computed at the perturbed point
         perturbed_params: The perturbed parameters
     """
+
+    theta_old = get_flat_params_from(policy.actor)
+    
     # First compute the base loss and gradients
     temp_distribution = policy.actor(data["obs"], data["risk"])
     log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
@@ -206,17 +303,20 @@ def compute_sam_gradients(policy, data, advantage, rho=0.05):
     # Compute gradients
     base_loss.backward(retain_graph=True)
     grads = get_flat_gradients_from(policy.actor)
-    grad_norm = torch.norm(grads)
     
-    # Compute perturbation
-    scale = rho / (grad_norm + 1e-12)
-    perturbed_params = []
-    for param in policy.actor.parameters():
-        if param.grad is None:
-            continue
-        e_w = param.grad * scale.to(param)
-        perturbed_params.append(e_w)
-        param.data.add_(e_w)
+    # Compute natural gradient direction
+    step_direction, x, xHx = compute_natural_gradient_direction(fvp, policy, data, grads, target_kl)
+
+    # Log gradient statistics
+    cos_sim, effective_rho, scale_along_grad = log_gradient_statistics(grads, step_direction, x)
+
+    # Find KL-constrained perturbation
+    step_frac, final_kl, accepted_step = compute_kl_constrained_perturbation(
+        policy, data, step_direction, target_kl, max_search_steps
+    )
+    
+    # Store the final perturbation
+    perturbed_params = step_frac * step_direction
     
     # Compute loss and gradients at perturbed point
     policy.actor.zero_grad()
@@ -230,12 +330,9 @@ def compute_sam_gradients(policy, data, advantage, rho=0.05):
     sam_grads = get_flat_gradients_from(policy.actor)
     
     # Restore original parameters
-    for param, e_w in zip(policy.actor.parameters(), perturbed_params):
-        if param.grad is None:
-            continue
-        param.data.sub_(e_w)
+    set_param_values_to_model(policy.actor, theta_old)
     
-    return sam_grads, perturbed_params
+    return sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad
 
 
 def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):
@@ -667,6 +764,8 @@ def main(args, cfg_env=None):
         fvp_obs = data["obs"][:: 1]
         fvp_risk = data["risk"][:: 1] if args.use_risk else None
         
+        data["fvp_obs"] = fvp_obs
+        data["fvp_risk"] = fvp_risk
         # Store old distribution and parameters before any updates
         old_distribution = policy.actor(data["obs"], data["risk"])
         theta_old = get_flat_params_from(policy.actor)
@@ -684,9 +783,13 @@ def main(args, cfg_env=None):
             ratio = torch.exp(log_prob - data["log_prob"])
             loss_before = -(ratio * advantage).mean().item()
         
-        # Get SAM gradients at perturbed point
-        sam_grads, perturbed_params = compute_sam_gradients(policy, data, advantage, rho=args.sam_rho)
-        
+        # Get SAM gradients at perturbed point (only if policy SAM is enabled)
+        sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad = compute_sam_gradients(
+            fvp, policy, data, advantage, 
+            rho=config.get('sam_rho', 0.05), 
+            target_kl=config['target_kl']
+        )
+
         # Use SAM gradients for TRPO update
         x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, -sam_grads, CONJUGATE_GRADIENT_ITERS)
         assert torch.isfinite(x).all(), "x is not finite"
@@ -761,6 +864,9 @@ def main(args, cfg_env=None):
                 "Misc/AcceptanceStep": acceptance_step,
                 "Loss/Loss_actor": loss_pi.mean().item(),
                 "Train/KL": final_kl,
+                "Misc/CosineSimilarity": cos_sim,
+                "Misc/EffectiveRho": effective_rho,
+                "Misc/ScaleAlongGrad": scale_along_grad,
             },
         )
 
@@ -877,6 +983,9 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/AcceptanceStep")
             logger.log_tabular("Metrics/ViolationRate")
             logger.log_tabular("Metrics/TotalViolation")
+            logger.log_tabular("Misc/CosineSimilarity")
+            logger.log_tabular("Misc/EffectiveRho")
+            logger.log_tabular("Misc/ScaleAlongGrad")
             if epoch % 20 == 0:
                 # Add critic evaluation metrics
                 logger.log_tabular("Reward Value/EstimationError")

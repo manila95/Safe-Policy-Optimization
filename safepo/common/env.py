@@ -31,8 +31,10 @@ import safety_gymnasium
 from safety_gymnasium.wrappers import SafeAutoResetWrapper, SafeRescaleAction, SafeUnsqueeze
 from safety_gymnasium.vector.async_vector_env import SafetyAsyncVectorEnv
 from safepo.common.wrappers import ShareSubprocVecEnv, ShareDummyVecEnv, ShareEnv, SafeNormalizeObservation, MultiGoalEnv
+import gymnasium as gym
 
-def make_sa_mujoco_env(cfg, num_envs: int, env_id: str, seed: int|None = None):
+
+def make_sa_safetygym_env(cfg, num_envs: int, env_id: str, seed: int|None = None):
     """
     Creates and wraps an environment based on the specified parameters.
 
@@ -78,6 +80,69 @@ def make_sa_mujoco_env(cfg, num_envs: int, env_id: str, seed: int|None = None):
         env = SafeUnsqueeze(env)
     
     return env, obs_space, act_space
+
+
+
+def make_sa_mujoco_env(cfg, num_envs: int, env_id: str, seed: int|None = None):
+    """
+    Creates and wraps an environment based on the specified parameters.
+
+    Args:
+        num_envs (int): Number of parallel environments.
+        env_id (str): ID of the environment to create.
+        seed (int or None, optional): Seed for the random number generator. Default is None.
+
+    Returns:
+        env: The created and wrapped environment.
+        obs_space: The observation space of the environment.
+        act_space: The action space of the environment.
+        
+    Examples:
+        >>> from safepo.common.env import make_sa_mujoco_env
+        >>> 
+        >>> env, obs_space, act_space = make_sa_mujoco_env(
+        >>>     num_envs=1, 
+        >>>     env_id="SafetyPointGoal1-v0", 
+        >>>     seed=0
+        >>> )
+    """
+    if num_envs > 1:
+        def create_env() -> Callable:
+            """Creates an environment that can enable or disable the environment checker."""
+            env = gym.make(env_id)
+            env = CostWrapper(env)
+            return env
+        env_fns = [create_env for _ in range(num_envs)]
+        env = SafetyAsyncVectorEnv(env_fns)
+        env.action_space.seed(seed)
+        obs_space = env.single_observation_space
+        act_space = env.single_action_space
+    else:
+        env = gym.make(env_id)
+        env = CostWrapper(env)
+        env.reset()
+        obs_space = env.observation_space
+        act_space = env.action_space
+        env.action_space.seed(seed)
+        env = SafeAutoResetWrapper(env)
+    
+    return env, obs_space, act_space
+
+
+class CostWrapper(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.cost_threshold = 1.0
+        self.early_termination = False
+        self.failure_penalty = 0.0
+    
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return obs, reward, terminated, terminated, truncated, info
+    
+    def reset(self):
+        obs, _ = self.env.reset()
+        return obs, {}
 
 def make_sa_isaac_env(args, cfg, sim_params):
     """

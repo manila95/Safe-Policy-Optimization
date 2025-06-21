@@ -102,7 +102,6 @@ def rollout_policy(
         if episodes_completed >= num_episodes:
             break
             
-    print(torch.sum(torch.stack(episode_data["costs"])))
     return episode_data
 
 def calculate_monte_carlo_returns_from_rollouts(

@@ -37,7 +37,7 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
+from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_safetygym_env
 from safepo.common.lagrange import PIDLagrangian as Lagrange
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
@@ -70,6 +70,13 @@ isaac_gym_specific_cfg = {
     'use_critic_norm': False,
     'use_layer_norm': False,
 }
+
+
+def env_fn(env_id):
+    if "Safety" in env_id:
+        return make_sa_safetygym_env
+    else:
+        return make_sa_mujoco_env
 
 def sam_gradients(model, grads, cost_closure, reward_closure, lagrange_closure, rho=0.05):
     
@@ -320,10 +327,10 @@ def main(args, cfg_env=None):
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num)])
 
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
+        env, obs_space, act_space = env_fn(args.task)(
             args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        eval_env, _, _ = make_sa_mujoco_env(args, num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = env_fn(args.task)(args, num_envs=1, env_id=args.task, seed=None)
         config = default_cfg
 
     else:
@@ -919,13 +926,13 @@ def main(args, cfg_env=None):
             logger.dump_tabular()
             if (epoch+1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)
-                if args.task not in isaac_gym_map.keys():
-                    logger.save_state(
-                        state_dict={
-                            "Normalizer": env.obs_rms,
-                        },
-                        itr = epoch
-                    )
+                # if args.task not in isaac_gym_map.keys():
+                #     logger.save_state(
+                #         state_dict={
+                #             "Normalizer": env.obs_rms,
+                #         },
+                #         itr = epoch
+                #     )
         ## Garbage Collection 
         data, dataloader = None, None
     ## Save Policy 

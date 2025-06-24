@@ -78,6 +78,43 @@ def env_fn(env_id):
     else:
         return make_sa_mujoco_env
 
+
+def compute_decaying_rho(epoch, total_epochs, rho_max, rho_min, temperature=1.0, decay_type='exponential'):
+    """
+    Compute decaying rho value based on training progress and temperature.
+    
+    Args:
+        epoch: Current epoch number
+        total_epochs: Total number of epochs
+        rho_max: Maximum rho value at the beginning
+        rho_min: Minimum rho value at the end
+        temperature: Temperature parameter controlling decay rate (higher = slower decay)
+        decay_type: Type of decay ('exponential', 'linear', 'cosine')
+    
+    Returns:
+        Current rho value
+    """
+    if total_epochs <= 1:
+        return rho_max
+    
+    progress = epoch / total_epochs
+    
+    if decay_type == 'exponential':
+        # Exponential decay with temperature control
+        decay_rate = 1.0 / temperature
+        rho = rho_max * (rho_min / rho_max) ** (progress * decay_rate)
+    elif decay_type == 'linear':
+        # Linear decay
+        rho = rho_max - (rho_max - rho_min) * progress
+    elif decay_type == 'cosine':
+        # Cosine annealing decay
+        rho = rho_min + 0.5 * (rho_max - rho_min) * (1 + np.cos(np.pi * progress))
+    else:
+        raise ValueError(f"Unknown decay type: {decay_type}")
+    
+    return max(rho_min, min(rho_max, rho))
+
+
 def sam_gradients(model, grads, cost_closure, reward_closure, lagrange_closure, rho=0.05):
     
     params_old = get_flat_params_from(model)
@@ -437,6 +474,26 @@ def main(args, cfg_env=None):
     total_violations = 0
     # training loop
     for epoch in range(epochs):
+        # Compute decaying rho value for SAM
+        if args.use_sam_rho_decay:
+            # Auto-compute rho_max and rho_min from single sam_rho value
+            rho_max = args.sam_rho
+            rho_min = args.sam_rho / 10.0
+            
+            current_rho = compute_decaying_rho(
+                epoch=epoch,
+                total_epochs=epochs,
+                rho_max=rho_max,
+                rho_min=rho_min,
+                temperature=args.sam_rho_temperature,
+                decay_type=args.sam_rho_decay_type
+            )
+        else:
+            current_rho = args.sam_rho
+        
+        # Log current rho value
+        logger.store(**{"Misc/CurrentRho": current_rho})
+        
         rollout_start_time = time.time()
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
@@ -692,7 +749,7 @@ def main(args, cfg_env=None):
             loss_before = -(ratio * advantage).mean().item()
         
         # Get SAM gradients at perturbed point
-        sam_grads, perturbed_params = compute_sam_gradients(policy, data, advantage, rho=args.sam_rho)
+        sam_grads, perturbed_params = compute_sam_gradients(policy, data, advantage, rho=current_rho)
         
         # Use SAM gradients for TRPO update
         x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, -sam_grads, CONJUGATE_GRADIENT_ITERS)
@@ -796,7 +853,7 @@ def main(args, cfg_env=None):
                     policy.reward_critic, 
                     {"obs": obs_b, "risk": risk_b}, 
                     target_value_r_b,
-                    rho=args.sam_rho
+                    rho=current_rho
                 )
                 for name, param in policy.reward_critic.named_parameters():
                     if name in sam_grads_r:
@@ -814,7 +871,7 @@ def main(args, cfg_env=None):
                     policy.cost_critic, 
                     {"obs": obs_b, "risk": risk_b}, 
                     target_value_c_b,
-                    rho=args.sam_rho
+                    rho=current_rho
                 )
                 for name, param in policy.cost_critic.named_parameters():
                     if name in sam_grads_c:
@@ -882,6 +939,7 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/gradient_norm")
             logger.log_tabular("Misc/H_inv_g")
             logger.log_tabular("Misc/AcceptanceStep")
+            logger.log_tabular("Misc/CurrentRho")
             logger.log_tabular("Metrics/ViolationRate")
             logger.log_tabular("Metrics/TotalViolation")
             if epoch % 20 == 0:

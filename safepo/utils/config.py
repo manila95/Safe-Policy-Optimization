@@ -193,7 +193,10 @@ def single_agent_args():
         {"name": "--cpo-step-fraction", "type": float, "default": 0.8, "help": "learning rate of lagrangian multiplier"},
         {"name": "--use-actor-layer-norm", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use layer normalization in the actor network"},
         {"name": "--use-critic-layer-norm", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use layer normalization in the critic networks"},
-        {"name": "--sam-rho", "type": float, "default": 0.05, "help": "SAM perturbation radius"},
+        {"name": "--sam-rho", "type": float, "default": 0.05, "help": "SAM perturbation radius (when decay is enabled, max=sam-rho, min=sam-rho/10)"},
+        {"name": "--sam-rho-temperature", "type": float, "default": 1.0, "help": "Temperature parameter for SAM rho decay (higher = slower decay)"},
+        {"name": "--sam-rho-decay-type", "type": str, "default": "exponential", "help": "Type of SAM rho decay: exponential, linear, or cosine"},
+        {"name": "--use-sam-rho-decay", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use decaying SAM rho value"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
@@ -245,7 +248,10 @@ def multi_agent_args(algo):
         {"name": "--total-steps", "type": int, "default": None, "help": "Total timesteps of the experiments"},
         {"name": "--num-envs", "type": int, "default": None, "help": "The number of parallel game environments"},
         {"name": "--randomize", "type": bool, "default": False, "help": "Wheather to randomize the environments' initial states"},
-        {"name": "--sam-rho", "type": float, "default": 0.05, "help": "SAM perturbation radius"},
+        {"name": "--sam-rho", "type": float, "default": 0.05, "help": "SAM perturbation radius (when decay is enabled, max=sam-rho, min=sam-rho/10)"},
+        {"name": "--sam-rho-temperature", "type": float, "default": 1.0, "help": "Temperature parameter for SAM rho decay (higher = slower decay)"},
+        {"name": "--sam-rho-decay-type", "type": str, "default": "exponential", "help": "Type of SAM rho decay: exponential, linear, or cosine"},
+        {"name": "--use-sam-rho-decay", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use decaying SAM rho value"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

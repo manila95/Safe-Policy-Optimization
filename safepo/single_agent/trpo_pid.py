@@ -276,7 +276,7 @@ def log_gradient_statistics(grads, step_direction, x):
     return cos_sim, effective_rho, scale_along_grad
 
 
-def compute_sam_gradients(fvp, policy, data, advantage, rho=0.05, target_kl=0.01, max_search_steps=10):
+def compute_sam_gradients(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10):
     """Compute Sharpness Aware Minimization gradients with KL constraint.
     
     Args:
@@ -294,11 +294,11 @@ def compute_sam_gradients(fvp, policy, data, advantage, rho=0.05, target_kl=0.01
 
     theta_old = get_flat_params_from(policy.actor)
     
-    # First compute the base loss and gradients
+    # First compute the base loss and gradients with respect to cost.
     temp_distribution = policy.actor(data["obs"], data["risk"])
     log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
     ratio = torch.exp(log_prob - data["log_prob"])
-    base_loss = -(ratio * advantage).mean()
+    base_loss = (ratio * advantage_cost).mean()
     
     # Compute gradients
     base_loss.backward(retain_graph=True)
@@ -310,7 +310,7 @@ def compute_sam_gradients(fvp, policy, data, advantage, rho=0.05, target_kl=0.01
     # Log gradient statistics
     cos_sim, effective_rho, scale_along_grad = log_gradient_statistics(grads, step_direction, x)
 
-    # Find KL-constrained perturbation
+    # Find KL-constrained perturbation in the direction of increasing cost.
     step_frac, final_kl, accepted_step = compute_kl_constrained_perturbation(
         policy, data, step_direction, target_kl, max_search_steps
     )
@@ -323,7 +323,7 @@ def compute_sam_gradients(fvp, policy, data, advantage, rho=0.05, target_kl=0.01
     temp_distribution = policy.actor(data["obs"], data["risk"])
     log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
     ratio = torch.exp(log_prob - data["log_prob"])
-    perturbed_loss = -(ratio * advantage).mean()
+    perturbed_loss = -(ratio * advantage_lag).mean()
     perturbed_loss.backward()
     
     # Get gradients at perturbed point
@@ -786,7 +786,7 @@ def main(args, cfg_env=None):
             
             # Get SAM gradients at perturbed point (only if policy SAM is enabled)
             sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad = compute_sam_gradients(
-                fvp, policy, data, advantage, 
+                fvp, policy, data, advantage, data["adv_c"], data["adv_r"],
                 rho=args.sam_rho, 
                 target_kl=args.perturbation_target_kl
             )

@@ -194,6 +194,9 @@ def single_agent_args():
         {"name": "--use-actor-layer-norm", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use layer normalization in the actor network"},
         {"name": "--use-critic-layer-norm", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use layer normalization in the critic networks"},
         {"name": "--sam-rho", "type": float, "default": 0.05, "help": "SAM perturbation radius"},
+        {"name": "--perturbation-target-kl", "type": float, "default": 0.005, "help": "Target KL divergence for perturbation"},
+        {"name": "--use-sam-critic", "type": lambda x: bool(strtobool(x)), "default": True, "help": "Whether to use SAM critic"},
+        {"name": "--use-sam-actor", "type": lambda x: bool(strtobool(x)), "default": True, "help": "Whether to use SAM actor"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

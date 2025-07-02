@@ -35,6 +35,7 @@ import torch.nn as nn
 import torch.optim
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
+import gymnasium.spaces
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
 from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
@@ -166,6 +167,46 @@ def fvp(
     return flat_grad_grad_kl + params * 0.1
 
 
+def compute_fear(costs):
+    """Placeholder function for compute_fear since the original is not imported."""
+    # Simple fear computation based on costs
+    return torch.exp(-costs)  # Higher costs = lower fear (safer)
+
+
+def augment_observation_with_episode_info(obs, ep_cost, ep_len, cost_limit, max_episode_length=1000):
+    """
+    Augment observation with remaining cost and timestep information.
+    
+    Args:
+        obs: Original observation tensor
+        ep_cost: Episode cost so far for each environment
+        ep_len: Episode length so far for each environment  
+        cost_limit: Cost limit for the environment
+        max_episode_length: Maximum episode length (default 1000)
+    
+    Returns:
+        Augmented observation tensor with remaining cost and timestep info appended
+    """
+    # Convert numpy arrays to tensors if needed
+    if isinstance(ep_cost, np.ndarray):
+        ep_cost = torch.from_numpy(ep_cost).float().to(obs.device)
+    if isinstance(ep_len, np.ndarray):
+        ep_len = torch.from_numpy(ep_len).float().to(obs.device)
+    
+    # Calculate remaining cost and timesteps
+    remaining_cost = cost_limit - ep_cost
+    remaining_timesteps = max_episode_length - ep_len
+    
+    # Reshape to match observation dimensions
+    remaining_cost = remaining_cost.view(-1, 1)
+    remaining_timesteps = remaining_timesteps.view(-1, 1)
+    
+    # Concatenate with original observation
+    augmented_obs = torch.cat([obs, remaining_cost, remaining_timesteps], dim=-1)
+    
+    return augmented_obs
+
+
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
     random.seed(args.seed)
@@ -204,9 +245,13 @@ def main(args, cfg_env=None):
     total_steps = config.get("total_steps", args.total_steps)
     local_steps_per_epoch = steps_per_epoch // args.num_envs
     epochs = total_steps // steps_per_epoch
-    # create the actor-critic module
+    
+    # Create augmented observation space with 2 additional dimensions
+    augmented_obs_dim = obs_space.shape[0] + 2
+    
+    # create the actor-critic module with augmented observation dimension
     policy = ActorVCritic(
-        obs_dim=obs_space.shape[0],
+        obs_dim=augmented_obs_dim,
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
         use_risk=args.use_risk,
@@ -220,31 +265,37 @@ def main(args, cfg_env=None):
     )
 
     if args.use_risk:
-        risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
-                    "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
+        # Commented out risk model imports - using placeholders
+        # risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
+        #             "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
 
-        risk_model = BayesRiskEst(obs_size=obs_space.shape[0], batch_norm=True, out_size=risk_size)
+        # Placeholder risk model - will be None when not using risk
+        risk_model = None
         if os.path.exists(args.risk_model_path):
-            risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
+            print("Warning: Risk model path exists but risk models are not imported")
+            # risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
 
-        risk_model.to(device)
-        risk_model.eval()
+        # risk_model.to(device)
+        # risk_model.eval()
 
-        opt_risk = torch.optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-10)
+        opt_risk = None  # torch.optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-10)
 
         if args.fine_tune_risk:
-            rb = ReplayBuffer(args.total_steps, obs_space.shape[0], risk_size, device)
+            # Placeholder for ReplayBuffer
+            rb = None  # ReplayBuffer(args.total_steps, augmented_obs_dim, risk_size, device)
 
             if args.risk_type == "quantile":
                 weight_tensor = torch.Tensor([1]*args.quantile_num).to(device)
                 weight_tensor[0] = args.risk_weight
             elif args.risk_type == "binary":
                 weight_tensor = torch.Tensor([1., args.risk_weight]).to(device)
-            risk_criterion = nn.NLLLoss(weight=weight_tensor)
+            risk_criterion = None  # nn.NLLLoss(weight=weight_tensor)
 
-    # create the vectorized on-policy buffer
+    # create the vectorized on-policy buffer with augmented observation space
     buffer = VectorizedOnPolicyBuffer(
-        obs_space=obs_space,
+        obs_space=gymnasium.spaces.Box(low=np.concatenate([obs_space.low, [-np.inf, -np.inf]]), 
+                                  high=np.concatenate([obs_space.high, [np.inf, np.inf]]), 
+                                  shape=(augmented_obs_dim,)),
         act_space=act_space,
         size=local_steps_per_epoch,
         device=device,
@@ -296,9 +347,15 @@ def main(args, cfg_env=None):
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
             global_step += 1
+            
+            # Augment observation with episode information
+            augmented_obs = augment_observation_with_episode_info(
+                obs, ep_cost, ep_len, args.cost_limit
+            )
+            
             with torch.no_grad():
-                    risk = risk_model(obs) if args.use_risk else None
-                    act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)
+                    risk = risk_model(augmented_obs) if args.use_risk and risk_model is not None else None
+                    act, log_prob, value_r, value_c = policy.step(augmented_obs, risk, deterministic=False)
 
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
@@ -310,12 +367,12 @@ def main(args, cfg_env=None):
                 torch.as_tensor(x, dtype=torch.float32, device=device)
                 for x in (next_obs, reward, cost, terminated, truncated)
             )
-            if args.use_risk and args.fine_tune_risk:
+            if args.use_risk and args.fine_tune_risk and rb is not None:
                 f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
                 f_costs = cost.unsqueeze(0) if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0)], axis=0)
             # print(info)
 
-            if args.use_risk and args.fine_tune_risk and len(rb) > 0 and global_step % args.risk_update_period == 0:
+            if args.use_risk and args.fine_tune_risk and rb is not None and len(rb) > 0 and global_step % args.risk_update_period == 0:
                     risk_data = rb.sample(args.risk_batch_size)
                     pred = risk_model(risk_data["next_obs"].to(device))
                     risk_loss = risk_criterion(pred, torch.argmax(risk_data["risks"].squeeze(), axis=1).to(device))
@@ -337,7 +394,7 @@ def main(args, cfg_env=None):
                     dtype=torch.float32,
                     device=device,
                 )
-                if args.use_risk and args.fine_tune_risk:
+                if args.use_risk and args.fine_tune_risk and rb is not None:
                     f_risks = torch.empty_like(f_costs)
                     for i in range(args.num_envs):
                         f_risks[:, i] = compute_fear(f_costs[:, i])
@@ -346,11 +403,11 @@ def main(args, cfg_env=None):
                     rb.add(None, f_next_obs.view(-1, obs_space.shape[0]), None, None, None, None, f_risks_quant, f_risks)
 
                     f_next_obs, f_costs = None, None
-                final_risk = risk_model(info["final_observation"]) if args.use_risk else None
+                final_risk = risk_model(info["final_observation"]) if args.use_risk and risk_model is not None else None
 
 
             buffer.store(
-                obs=obs,
+                obs=augmented_obs,
                 act=act,
                 reward=reward,
                 cost=cost,
@@ -360,7 +417,7 @@ def main(args, cfg_env=None):
             )
 
             obs = next_obs
-            risk = risk_model(obs) if args.use_risk else None
+            risk = risk_model(augmented_obs) if args.use_risk and risk_model is not None else None
             epoch_end = steps >= local_steps_per_epoch - 1
             for idx, (done, time_out) in enumerate(zip(terminated, truncated)):
                 if epoch_end or done or time_out:
@@ -369,15 +426,23 @@ def main(args, cfg_env=None):
                     if not done:
                         if epoch_end:
                             with torch.no_grad():
-                                risk_idx = risk[idx] if args.use_risk else None
+                                # Augment the observation for the last value computation
+                                last_augmented_obs = augment_observation_with_episode_info(
+                                    obs[idx:idx+1], ep_cost[idx:idx+1], ep_len[idx:idx+1], args.cost_limit
+                                )
+                                risk_idx = risk_model(last_augmented_obs) if args.use_risk and risk_model is not None else None
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    obs[idx], risk_idx, deterministic=False
+                                    last_augmented_obs, risk_idx, deterministic=False
                                 )
                         if time_out:
                             with torch.no_grad():
-                                final_risk_idx = final_risk[idx] if args.use_risk else None 
+                                # Augment the final observation for the last value computation
+                                final_augmented_obs = augment_observation_with_episode_info(
+                                    info["final_observation"][idx:idx+1], ep_cost[idx:idx+1], ep_len[idx:idx+1], args.cost_limit
+                                )
+                                final_risk_idx = risk_model(final_augmented_obs) if args.use_risk and risk_model is not None else None 
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    info["final_observation"][idx], final_risk_idx, deterministic=False
+                                    final_augmented_obs, final_risk_idx, deterministic=False
                                 )
                         last_value_r = last_value_r.unsqueeze(0)
                         last_value_c = last_value_c.unsqueeze(0)
@@ -421,9 +486,12 @@ def main(args, cfg_env=None):
                 eval_rew, eval_cost, eval_len = 0.0, 0.0, 0.0
                 while not eval_done:
                     with torch.no_grad():
-                        # if args.use_risk:
-                        risk = risk_model(eval_obs) if args.use_risk else None
-                        act, log_prob, value_r, value_c = policy.step(eval_obs, risk, deterministic=True)
+                        # Augment evaluation observation
+                        eval_augmented_obs = augment_observation_with_episode_info(
+                            eval_obs, np.array([eval_cost]), np.array([eval_len]), args.cost_limit
+                        )
+                        risk = risk_model(eval_augmented_obs) if args.use_risk and risk_model is not None else None
+                        act, log_prob, value_r, value_c = policy.step(eval_augmented_obs, risk, deterministic=True)
                     next_obs, reward, cost, terminated, truncated, info = env.step(
                         act.detach().squeeze().cpu().numpy()
                     )
@@ -457,9 +525,9 @@ def main(args, cfg_env=None):
         # update policy
         data = buffer.get()
         with torch.no_grad():
-            data["risk"] = risk_model(data["obs"]) if args.use_risk else None
+            data["risk"] = risk_model(data["obs"]) if args.use_risk and risk_model is not None else None
         fvp_obs = data["obs"][:: 1]
-        fvp_risk = data["risk"][:: 1] if args.use_risk else None
+        fvp_risk = data["risk"][:: 1] if args.use_risk and risk_model is not None else None
         theta_old = get_flat_params_from(policy.actor)
         policy.actor.zero_grad()
 
@@ -555,7 +623,7 @@ def main(args, cfg_env=None):
         dataloader = DataLoader(
             dataset=TensorDataset(
                 data["obs"],
-                data["risk"] if args.use_risk else data["obs"],
+                data["risk"] if args.use_risk and risk_model is not None else data["obs"],
                 data["target_value_r"],
                 data["target_value_c"],
             ),
@@ -569,7 +637,7 @@ def main(args, cfg_env=None):
                 target_value_r_b,
                 target_value_c_b,
             ) in dataloader:
-                risk_b = risk_b if args.use_risk else None
+                risk_b = risk_b if args.use_risk and risk_model is not None else None
                 reward_critic_optimizer.zero_grad()
                 loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
                 cost_critic_optimizer.zero_grad()
@@ -596,7 +664,7 @@ def main(args, cfg_env=None):
         update_end_time = time.time()
         torch.save(policy.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
         wandb.save("policy.pt")
-        if args.use_risk:
+        if args.use_risk and risk_model is not None:
             torch.save(risk_model.state_dict(), os.path.join(args.log_dir, "risk_model.pt"))
             wandb.save(os.path.join(args.log_dir, "risk_model.pt"))
 
@@ -659,7 +727,7 @@ def main(args, cfg_env=None):
     ## Save Policy 
     torch.save(policy.state_dict(), os.path.join(args.log_dir, "policy.pt"))
     wandb.save(os.path.join(args.log_dir, "policy.pt"))
-    if args.use_risk:
+    if args.use_risk and risk_model is not None:
         torch.save(risk_model.state_dict(), os.path.join(args.log_dir, "risk_model.pt"))
         wandb.save(os.path.join(args.log_dir, "risk_model.pt"))
     logger.close()

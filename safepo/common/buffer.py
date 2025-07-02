@@ -115,6 +115,13 @@ class VectorizedOnPolicyBuffer:
         path_slice = slice(self.path_start_idx_list[idx], self.ptr_list[idx])
         last_value_r = last_value_r.to(self._device)
         last_value_c = last_value_c.to(self._device)
+        
+        # Ensure last_value_r and last_value_c have the same number of dimensions as reward/cost tensors
+        if last_value_r.dim() == 2:
+            last_value_r = last_value_r.squeeze(0)
+        if last_value_c.dim() == 2:
+            last_value_c = last_value_c.squeeze(0)
+        
         rewards = torch.cat([self.buffers[idx]["reward"][path_slice], last_value_r])
         costs = torch.cat([self.buffers[idx]["cost"][path_slice], last_value_c])
         values_r = torch.cat([self.buffers[idx]["value_r"][path_slice], last_value_r])
@@ -409,6 +416,8 @@ class SeparatedReplayBuffer(object):
         actions = self.actions.reshape(-1, self.actions.shape[-1])
         if self.available_actions is not None:
             available_actions = self.available_actions[:-1].reshape(-1, self.available_actions.shape[-1])
+        else:
+            available_actions_batch = None
         value_preds = self.value_preds[:-1].reshape(-1, 1)
         returns = self.returns[:-1].reshape(-1, 1)
         cost_preds = self.cost_preds[:-1].reshape(-1, 1)

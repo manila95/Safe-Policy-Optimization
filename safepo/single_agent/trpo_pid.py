@@ -191,7 +191,7 @@ def fvp(
     return flat_grad_grad_kl + params * 0.1
 
 
-def compute_sam_gradients(policy, data, advantage, rho=0.05):
+def compute_sam_gradients(policy, data, advantage_lag, advantage_cost, advantage_rew, rho=0.05):
     """Compute Sharpness Aware Minimization gradients.
     
     Args:
@@ -208,7 +208,7 @@ def compute_sam_gradients(policy, data, advantage, rho=0.05):
     temp_distribution = policy.actor(data["obs"], data["risk"])
     log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
     ratio = torch.exp(log_prob - data["log_prob"])
-    base_loss = -(ratio * advantage).mean()
+    base_loss = (ratio * advantage_cost).mean()
     
     # Compute gradients
     base_loss.backward(retain_graph=True)
@@ -230,7 +230,7 @@ def compute_sam_gradients(policy, data, advantage, rho=0.05):
     temp_distribution = policy.actor(data["obs"], data["risk"])
     log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
     ratio = torch.exp(log_prob - data["log_prob"])
-    perturbed_loss = -(ratio * advantage).mean()
+    perturbed_loss = -(ratio * advantage_lag).mean()
     perturbed_loss.backward()
     
     # Get gradients at perturbed point
@@ -692,7 +692,7 @@ def main(args, cfg_env=None):
             loss_before = -(ratio * advantage).mean().item()
         
         # Get SAM gradients at perturbed point
-        sam_grads, perturbed_params = compute_sam_gradients(policy, data, advantage, rho=args.sam_rho)
+        sam_grads, perturbed_params = compute_sam_gradients(policy, data, advantage, data["adv_c"], data["adv_r"], rho=args.sam_rho)
         
         # Use SAM gradients for TRPO update
         x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, -sam_grads, CONJUGATE_GRADIENT_ITERS)

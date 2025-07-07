@@ -31,8 +31,10 @@ import safety_gymnasium
 from safety_gymnasium.wrappers import SafeAutoResetWrapper, SafeRescaleAction, SafeUnsqueeze
 from safety_gymnasium.vector.async_vector_env import SafetyAsyncVectorEnv
 from safepo.common.wrappers import ShareSubprocVecEnv, ShareDummyVecEnv, ShareEnv, SafeNormalizeObservation, MultiGoalEnv
+import gymnasium as gym
+import numpy as np
 
-def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
+def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None, use_aug: bool = False, cost_limit: float = 10.0, horizon: int = 1000):
     """
     Creates and wraps an environment based on the specified parameters.
 
@@ -60,6 +62,9 @@ def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
             """Creates an environment that can enable or disable the environment checker."""
             env = safety_gymnasium.make(env_id)
             env = SafeRescaleAction(env, -1.0, 1.0)
+            if use_aug:
+                print("Using augmented observation")
+                env = SafeConstraintBudgetWrapper(env, cost_limit, horizon)
             return env
         env_fns = [create_env for _ in range(num_envs)]
         env = SafetyAsyncVectorEnv(env_fns)
@@ -69,6 +74,8 @@ def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
         act_space = env.single_action_space
     else:
         env = safety_gymnasium.make(env_id)
+        if use_aug:
+            env = SafeConstraintBudgetWrapper(env, cost_limit, horizon)
         env.reset(seed=seed)
         obs_space = env.observation_space
         act_space = env.action_space
@@ -78,6 +85,68 @@ def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
         env = SafeUnsqueeze(env)
     
     return env, obs_space, act_space
+
+
+class SafeConstraintBudgetWrapper(gym.Wrapper):
+    """
+    A wrapper that augments the observation with remaining constraint budget and timesteps.
+    
+    Args:
+        env: The environment to wrap
+        cost_limit: The maximum allowed cumulative cost per episode
+        horizon: The episode horizon/length
+    """
+    def __init__(self, env, cost_limit, horizon):
+        super().__init__(env)
+        self.cost_limit = cost_limit
+        self.horizon = horizon
+        self.current_cost = 0
+        self.current_step = 0
+        
+        # Extend observation space to include budget and time remaining
+        if isinstance(env.observation_space, gym.spaces.Dict):
+            spaces = env.observation_space.spaces.copy()
+            spaces['constraint_budget'] = gym.spaces.Box(
+                low=0, high=cost_limit, shape=(1,), dtype=np.float32
+            )
+            spaces['time_remaining'] = gym.spaces.Box(
+                low=0, high=horizon, shape=(1,), dtype=np.float32
+            )
+            self.observation_space = gym.spaces.Dict(spaces)
+        else:
+            low = np.concatenate([env.observation_space.low, [0, 0]])
+            high = np.concatenate([env.observation_space.high, [cost_limit, horizon]])
+            self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self.current_cost = 0
+        self.current_step = 0
+        return self._augment_observation(obs), info
+
+    def step(self, action):
+        obs, reward, cost, terminated, truncated, info = self.env.step(action)
+        self.current_cost += cost
+        self.current_step += 1
+        return self._augment_observation(obs), reward, cost, terminated, truncated, info
+        
+    def _augment_observation(self, obs):
+        remaining_budget = self.cost_limit - self.current_cost
+        remaining_time = self.horizon - self.current_step
+        
+        if isinstance(obs, dict):
+            obs = obs.copy()
+            obs['constraint_budget'] = np.array([remaining_budget], dtype=np.float32)
+            obs['time_remaining'] = np.array([remaining_time], dtype=np.float32)
+            return obs
+        else:
+            return np.concatenate([
+                obs,
+                np.array([remaining_budget, remaining_time], dtype=np.float32)
+            ])
+
+
+
 
 def make_sa_isaac_env(args, cfg, sim_params):
     """

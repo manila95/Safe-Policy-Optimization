@@ -185,9 +185,10 @@ def main(args, cfg_env=None):
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_mujoco_env(
-            num_envs=args.num_envs, env_id=args.task, seed=args.seed
+            num_envs=args.num_envs, env_id=args.task, seed=args.seed, 
+            use_aug=args.use_aug, cost_limit=args.cost_limit, horizon=1000
         )
-        eval_env, _, _ = make_sa_mujoco_env(num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = make_sa_mujoco_env(num_envs=1, env_id=args.task, seed=None, use_aug=args.use_aug, cost_limit=args.cost_limit, horizon=1000)
         config = default_cfg
 
     else:
@@ -287,6 +288,8 @@ def main(args, cfg_env=None):
     )
     total_cost, eval_total_cost = 0, 0
     f_next_obs, f_costs = None, None
+
+    print(obs.size())
 
     global_step = 0
     total_violations = 0

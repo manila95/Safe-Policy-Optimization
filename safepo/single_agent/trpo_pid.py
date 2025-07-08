@@ -37,7 +37,7 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
+from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_gymrobot_env
 from safepo.common.lagrange import PIDLagrangian as Lagrange
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
@@ -417,12 +417,18 @@ def main(args, cfg_env=None):
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num)])
 
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
-            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
-        )
-        eval_env, _, _ = make_sa_mujoco_env(args, num_envs=1, env_id=args.task, seed=None)
-        config = default_cfg
-
+        if "Safe" in args.task:
+            env, obs_space, act_space = make_sa_mujoco_env(
+                args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
+            )
+            eval_env, _, _ = make_sa_mujoco_env(args, num_envs=1, env_id=args.task, seed=None)
+            config = default_cfg
+        else:
+            env, obs_space, act_space = make_sa_gymrobot_env(
+                num_envs=args.num_envs, env_id=args.task, seed=args.seed
+            )
+            eval_env, _, _ = make_sa_gymrobot_env(num_envs=1, env_id=args.task, seed=None)
+            config = default_cfg
     else:
         sim_params = parse_sim_params(cfg_env, None)
         env = make_sa_isaac_env(cfg=cfg_env, sim_params=sim_params)
@@ -536,7 +542,11 @@ def main(args, cfg_env=None):
                     act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)
 
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
-            next_obs, reward, cost, terminated, truncated, info = env.step(action)
+            if "Safe" in args.task:
+                next_obs, reward, cost, terminated, truncated, info = env.step(action)
+            else:
+                next_obs, reward, terminated, truncated, info = env.step(action)
+                cost = info["cost"]
 
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
@@ -647,6 +657,7 @@ def main(args, cfg_env=None):
         if epoch % 20 == 0:
             # Evaluate critic performance using fresh rollouts
             critic_metrics = evaluate_critic_performance_from_rollouts(
+                args=args,
                 policy=policy,
                 env=env,
                 num_episodes=int(100 / args.num_envs),
@@ -723,7 +734,7 @@ def main(args, cfg_env=None):
                 eval_obs = torch.as_tensor(eval_obs, dtype=torch.float32, device=device)
                 eval_rew, eval_cost, eval_len = 0.0, 0.0, 0.0
                 while not eval_done:
-                    with torch.no_grad():
+                    with torch.no_grad():   
                         # if args.use_risk:
                         risk = risk_model(eval_obs) if args.use_risk else None
                         act, log_prob, value_r, value_c = policy.step(eval_obs, risk, deterministic=True)
@@ -1095,7 +1106,7 @@ if __name__ == "__main__":
     import wandb
     run = wandb.init(config=vars(args), entity="kaustubh95",
                 project="conservatism_rl",
-                monitor_gym=True,
+                # monitor_gym=True,
                 sync_tensorboard=True, save_code=True)
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])

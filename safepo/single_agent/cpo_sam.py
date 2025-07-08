@@ -336,6 +336,8 @@ def main(args, cfg_env=None):
         use_risk=args.use_risk,
         risk_size=risk_size,
     ).to(device)
+    
+    # Use SAM optimizers for critics
     reward_critic_optimizer = SAM(
         policy.reward_critic.parameters(), torch.optim.Adam, rho=0.05, lr=1e-3
     )
@@ -905,4 +907,4 @@ if __name__ == "__main__":
                 sys.stderr = f_error
                 main(args, cfg_env)
     else:
-        main(args, cfg_env)
+        main(args, cfg_env) 

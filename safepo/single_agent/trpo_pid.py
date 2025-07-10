@@ -37,12 +37,13 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_safetygym_env
+from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
 from safepo.common.lagrange import PIDLagrangian as Lagrange
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
 from safepo.single_agent.utils import *
+from sam import *
 
 CONJUGATE_GRADIENT_ITERS=15
 TRPO_SEARCHING_STEPS=15
@@ -72,241 +73,108 @@ isaac_gym_specific_cfg = {
 }
 
 
+def actor_sam_fn(args):
+    if args.sam_type == "v1":
+        if args.use_kl:
+            return compute_sam_gradients_v1_kl
+        else:
+            return compute_sam_gradients_v1
+    elif args.sam_type == "v2":
+        if args.use_kl:
+            return compute_sam_gradients_v2_kl
+        else:
+            return compute_sam_gradients_v2
+    elif args.sam_type == "v3":
+        if args.use_kl:
+            return compute_sam_gradients_v3_kl
+        else:
+            return compute_sam_gradients_v3
+    else:
+        raise ValueError(f"Invalid SAM type: {args.sam_type}")
+
+def render_and_save_gif(env, policy, device, max_steps=2000, use_risk=False, risk_model=None, gif_name="episode", wandb_log=True):
+    """
+    Renders an episode using the given policy and saves it as a gif.
+    
+    Args:
+        env: The environment to render
+        policy: The policy to use for actions
+        device: The device to run the policy on
+        max_steps: Maximum number of steps per episode
+        use_risk: Whether to use risk model
+        risk_model: Risk model to use if use_risk is True
+        gif_name: Name to save the gif as
+        wandb_log: Whether to log gif to wandb
+    """
+    import imageio
+    import os
+    
+    frames = []
+    obs, _ = env.reset()
+    obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
+    
+    done = False
+    ep_len = 0
+    
+    while not done and ep_len < max_steps:
+        # Render and save frame
+        frame = env.render()
+        frames.append(frame)
+        
+        # Get action from policy
+        with torch.no_grad():
+            risk = risk_model(obs) if use_risk else None
+            action, _, _, _ = policy.step(obs, risk, deterministic=True)
+        
+        # Take step in environment
+        action = action.detach().cpu().numpy()
+        obs, _, terminated, truncated, _ = env.step(action)
+        obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
+        
+        done = terminated or truncated
+        ep_len += 1
+    
+    # Save gif
+    gif_path = os.path.join(wandb.run.dir, f"{gif_name}.gif")
+    imageio.mimsave(gif_path, frames, duration=30)
+    
+    # Log to wandb if requested
+    if wandb_log:
+        wandb.log({f"plots/{gif_name}": wandb.Image(gif_path)})
+    
+    # Clean up gif file if logged to wandb
+    if wandb_log and os.path.exists(gif_path):
+        os.remove(gif_path)
+        
+    return frames
+
+# To ensure that the same observation normalization is used for both `env` and `eval_env`,
+# you should share the same normalization statistics (e.g., running mean and variance)
+# between them. If you are using a wrapper like NormalizeObservation or a custom
+# normalization wrapper, you can do the following after creating both environments:
+
+# Alternatively, if you use a wrapper class, you can pass the same instance or
+# periodically sync the statistics:
+def sync_obs_normalization(env, eval_env):
+    if hasattr(env, 'obs_rms') and hasattr(eval_env, 'obs_rms'):
+        eval_env.obs_rms.mean = env.obs_rms.mean.copy()
+        eval_env.obs_rms.var = env.obs_rms.var.copy()
+        eval_env.obs_rms.count = env.obs_rms.count
+
+# Call this function before evaluation to sync stats
+# sync_obs_normalization(env, eval_env)
+
+# If you use a vectorized environment, ensure the normalization wrapper is applied
+# identically to both, and share or sync the statistics as above.
+
+
 def env_fn(env_id):
     if "Safety" in env_id:
         return make_sa_safetygym_env
     else:
-        return make_sa_mujoco_env
-
-def sam_gradients(model, grads, cost_closure, reward_closure, lagrange_closure, rho=0.05):
-    
-    params_old = get_flat_params_from(model)
-    loss = cost_closure()
-    loss.backward(retain_graph=True)
-    grad_norm = self._grad_norm()
-    scale = rho / (grad_norm + 1e-12)
-
-    perturbations = []
-    for param in model.parameters():
-        if param.grad is None:
-            continue
-        e_w = param.grad * scale.to(param)
-        perturbations.append(e_w)
-        param.data.add_(e_w)
-    
-    loss_perturbed = lagrange_closure()
+        return make_sa_gymrobot_env
 
 
-def get_flat_params_from(model: torch.nn.Module) -> torch.Tensor:
-    flat_params = []
-    for _, param in model.named_parameters():
-        if param.requires_grad:
-            data = param.data
-            data = data.view(-1)  # flatten tensor
-            flat_params.append(data)
-    assert flat_params, "No gradients were found in model parameters."
-    return torch.cat(flat_params)
-
-
-def conjugate_gradients(
-    fisher_product: Callable[[torch.Tensor], torch.Tensor],
-    policy: ActorVCritic,
-    fvp_obs: torch.Tensor,
-    fvp_risk: torch.Tensor,
-    vector_b: torch.Tensor,
-    num_steps: int = 10,
-    residual_tol: float = 1e-10,
-    eps: float = 1e-6,
-) -> torch.Tensor:
-    vector_x = torch.zeros_like(vector_b)
-    vector_r = vector_b - fisher_product(vector_x, policy, fvp_obs, fvp_risk)
-    vector_p = vector_r.clone()
-    rdotr = torch.dot(vector_r, vector_r)
-
-    for _ in range(num_steps):
-        vector_z = fisher_product(vector_p, policy, fvp_obs, fvp_risk)
-        alpha = rdotr / (torch.dot(vector_p, vector_z) + eps)
-        vector_x += alpha * vector_p
-        vector_r -= alpha * vector_z
-        new_rdotr = torch.dot(vector_r, vector_r)
-        if torch.sqrt(new_rdotr) < residual_tol:
-            break
-        vector_mu = new_rdotr / (rdotr + eps)
-        vector_p = vector_r + vector_mu * vector_p
-        rdotr = new_rdotr
-    return vector_x
-
-
-def set_param_values_to_model(model: torch.nn.Module, vals: torch.Tensor) -> None:
-    assert isinstance(vals, torch.Tensor)
-    i: int = 0
-    for _, param in model.named_parameters():
-        if param.requires_grad:  # param has grad and, hence, must be set
-            orig_size = param.size()
-            size = np.prod(list(param.size()))
-            new_values = vals[i : int(i + size)]
-            # set new param values
-            new_values = new_values.view(orig_size)
-            param.data = new_values
-            i += int(size)  # increment array position
-    assert i == len(vals), f"Lengths do not match: {i} vs. {len(vals)}"
-
-
-def get_flat_gradients_from(model: torch.nn.Module) -> torch.Tensor:
-    grads = []
-    for _, param in model.named_parameters():
-        if param.requires_grad and param.grad is not None:
-            grad = param.grad
-            grads.append(grad.view(-1))  # flatten tensor and append
-    assert grads, "No gradients were found in model parameters."
-    return torch.cat(grads)
-
-
-def fvp(
-    params: torch.Tensor,
-    policy: ActorVCritic,
-    fvp_obs: torch.Tensor,
-    fvp_risk: torch.Tensor,
-) -> torch.Tensor:
-    policy.actor.zero_grad()
-    current_distribution = policy.actor(fvp_obs, fvp_risk)
-    with torch.no_grad():
-        old_distribution = policy.actor(fvp_obs, fvp_risk)
-    kl = torch.distributions.kl.kl_divergence(
-        old_distribution, current_distribution
-    ).mean()
-
-    grads = torch.autograd.grad(kl, tuple(policy.actor.parameters()), create_graph=True)
-    flat_grad_kl = torch.cat([grad.view(-1) for grad in grads])
-
-    kl_p = (flat_grad_kl * params).sum()
-    grads = torch.autograd.grad(
-        kl_p,
-        tuple(policy.actor.parameters()),
-        retain_graph=False,
-    )
-
-    flat_grad_grad_kl = torch.cat([grad.contiguous().view(-1) for grad in grads])
-
-    return flat_grad_grad_kl + params * 0.1
-
-
-def compute_sam_gradients(policy, data, advantage, rho=0.05):
-    """Compute Sharpness Aware Minimization gradients.
-    
-    Args:
-        policy: The policy network
-        data: Dictionary containing observations, actions, etc.
-        advantage: Advantage values
-        rho: Perturbation radius for SAM
-        
-    Returns:
-        sam_grads: The gradients computed at the perturbed point
-        perturbed_params: The perturbed parameters
-    """
-    # First compute the base loss and gradients
-    temp_distribution = policy.actor(data["obs"], data["risk"])
-    log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
-    ratio = torch.exp(log_prob - data["log_prob"])
-    base_loss = -(ratio * advantage).mean()
-    
-    # Compute gradients
-    base_loss.backward(retain_graph=True)
-    grads = get_flat_gradients_from(policy.actor)
-    grad_norm = torch.norm(grads)
-    
-    # Compute perturbation
-    scale = rho / (grad_norm + 1e-12)
-    perturbed_params = []
-    for param in policy.actor.parameters():
-        if param.grad is None:
-            continue
-        e_w = param.grad * scale.to(param)
-        perturbed_params.append(e_w)
-        param.data.add_(e_w)
-    
-    # Compute loss and gradients at perturbed point
-    policy.actor.zero_grad()
-    temp_distribution = policy.actor(data["obs"], data["risk"])
-    log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
-    ratio = torch.exp(log_prob - data["log_prob"])
-    perturbed_loss = -(ratio * advantage).mean()
-    perturbed_loss.backward()
-    
-    # Get gradients at perturbed point
-    sam_grads = get_flat_gradients_from(policy.actor)
-    
-    # Restore original parameters
-    for param, e_w in zip(policy.actor.parameters(), perturbed_params):
-        if param.grad is None:
-            continue
-        param.data.sub_(e_w)
-    
-    return sam_grads, perturbed_params
-
-
-def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):
-    """Compute Sharpness Aware Minimization gradients for critic.
-    
-    Args:
-        critic: The critic network (reward or cost)
-        data: Dictionary containing observations, risk values
-        target_values: Target values for the critic
-        rho: Perturbation radius for SAM
-        
-    Returns:
-        sam_grads: Dictionary mapping parameter names to their SAM gradients
-        perturbed_params: The perturbed parameters
-    """
-    # Store original parameters
-    original_params = []
-    for param in critic.parameters():
-        if param.requires_grad:
-            original_params.append(param.data.clone())
-    
-    # First compute the base loss and gradients
-    critic.zero_grad()
-    value_pred = critic(data["obs"], data["risk"])
-    base_loss = nn.functional.mse_loss(value_pred, target_values)
-    
-    # Compute gradients
-    base_loss.backward(retain_graph=True)
-    
-    # Get gradients and compute norm
-    grad_norm = 0.0
-    for param in critic.parameters():
-        if param.grad is not None:
-            grad_norm += param.grad.data.norm(2).item() ** 2
-    grad_norm = grad_norm ** 0.5
-    
-    # Compute perturbation
-    scale = rho / (grad_norm + 1e-12)
-    perturbed_params = []
-    for param in critic.parameters():
-        if param.grad is None:
-            continue
-        e_w = param.grad * scale
-        perturbed_params.append(e_w)
-        param.data.add_(e_w)
-    
-    # Compute loss and gradients at perturbed point
-    critic.zero_grad()
-    value_pred = critic(data["obs"], data["risk"])
-    perturbed_loss = nn.functional.mse_loss(value_pred, target_values)
-    perturbed_loss.backward()
-    
-    # Get gradients at perturbed point
-    sam_grads = {}
-    for name, param in critic.named_parameters():
-        if param.grad is not None:
-            sam_grads[name] = param.grad.clone()
-    
-    # Restore original parameters
-    for param, orig_param in zip(critic.parameters(), original_params):
-        if param.requires_grad:
-            param.data.copy_(orig_param)
-    
-    return sam_grads, perturbed_params
 
 
 def main(args, cfg_env=None):
@@ -415,6 +283,7 @@ def main(args, cfg_env=None):
     cost_deque = deque(maxlen=50)
     len_deque = deque(maxlen=50)
     goal_deque = deque(maxlen=50)
+    success_deque = deque(maxlen=50)
     eval_rew_deque = deque(maxlen=50)
     eval_cost_deque = deque(maxlen=50)
     eval_len_deque = deque(maxlen=50)
@@ -424,7 +293,8 @@ def main(args, cfg_env=None):
     logger.log("Start with training.")
     obs, _ = env.reset()
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
-    ep_ret, ep_cost, ep_len, ep_goal = (
+    ep_ret, ep_cost, ep_len, ep_goal, ep_success = (
+        np.zeros(args.num_envs),
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
@@ -435,6 +305,7 @@ def main(args, cfg_env=None):
 
     global_step = 0
     total_violations = 0
+    
     # training loop
     for epoch in range(epochs):
         rollout_start_time = time.time()
@@ -446,10 +317,18 @@ def main(args, cfg_env=None):
                     act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)
 
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
-            next_obs, reward, cost, terminated, truncated, info = env.step(action)
+            
+            if "Safe" in args.task:
+                next_obs, reward, cost, terminated, truncated, info = env.step(action)
+                success = 0
+            else:
+                next_obs, reward, terminated, truncated, info = env.step(action)
+                cost = info["cost"]
+                success = info["success"]
 
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
+            ep_success += success.cpu().numpy() if args.task in isaac_gym_map.keys() else success
             ep_len += 1
             next_obs, reward, cost, terminated, truncated = (
                 torch.as_tensor(x, dtype=torch.float32, device=device)
@@ -530,6 +409,7 @@ def main(args, cfg_env=None):
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
+                        success_deque.append(ep_success[idx])
                         #goal_deque.append(info["final_info"][idx]["cum_goal_met"])
                         total_cost += ep_cost[idx]
                         violations = np.sum(np.array(cost_deque) > args.cost_limit)
@@ -537,8 +417,12 @@ def main(args, cfg_env=None):
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),
+                                "Metrics/EpRetStd": np.std(rew_deque),
                                 "Metrics/EpCost": np.mean(cost_deque),
+                                "Metrics/EpCostStd": np.std(cost_deque),
                                 "Metrics/EpLen": np.mean(len_deque),
+                                "Metrics/EpSuccess": np.mean(success_deque),
+                                "Metrics/EpSuccessStd": np.std(success_deque),
                                 #"Metrics/EpGoal": np.mean(goal_deque),
                                 "Metrics/TotalCost": total_cost,
                                 "Metrics/ViolationRate": np.mean(np.array(cost_deque) > args.cost_limit),
@@ -548,6 +432,7 @@ def main(args, cfg_env=None):
                         ep_ret[idx] = 0.0
                         ep_cost[idx] = 0.0
                         ep_len[idx] = 0.0
+                        ep_success[idx] = 0.0
                         logger.logged = False
 
                     buffer.finish_path(
@@ -557,6 +442,7 @@ def main(args, cfg_env=None):
         if epoch % 20 == 0:
             # Evaluate critic performance using fresh rollouts
             critic_metrics = evaluate_critic_performance_from_rollouts(
+                args=args,
                 policy=policy,
                 env=env,
                 num_episodes=int(100 / args.num_envs),
@@ -661,6 +547,11 @@ def main(args, cfg_env=None):
                 }
             )
 
+        if epoch % 100 == 0 and args.record_gif:
+            eval_env.obs_rms = env.obs_rms
+            render_and_save_gif(eval_env, policy, device, max_steps=1000, use_risk=args.use_risk, risk_model=risk_model if args.use_risk else None, gif_name=f"episode_{epoch}", wandb_log=True)
+
+
         eval_end_time = time.time()
 
         # update lagrange multiplier
@@ -674,6 +565,8 @@ def main(args, cfg_env=None):
         fvp_obs = data["obs"][:: 1]
         fvp_risk = data["risk"][:: 1] if args.use_risk else None
         
+        data["fvp_obs"] = fvp_obs
+        data["fvp_risk"] = fvp_risk
         # Store old distribution and parameters before any updates
         old_distribution = policy.actor(data["obs"], data["risk"])
         theta_old = get_flat_params_from(policy.actor)
@@ -685,27 +578,50 @@ def main(args, cfg_env=None):
         advantage /= (lagrange.lagrangian_multiplier + 1)
         
         # Compute initial loss before any updates
-        with torch.no_grad():
+        if args.use_sam_actor:
+            with torch.no_grad():
+                temp_distribution = policy.actor(data["obs"], data["risk"])
+                log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+                ratio = torch.exp(log_prob - data["log_prob"])
+                loss_before = -(ratio * advantage).mean().item()
+            
+            # Get SAM gradients at perturbed point
+            sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad = actor_sam_fn(args)(
+                fvp, policy, data, advantage, data["adv_c"], data["adv_r"],
+                rho=args.sam_rho, 
+                target_kl=args.perturbation_target_kl
+            )
+            # Use SAM gradients for TRPO update
+            x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, -sam_grads, CONJUGATE_GRADIENT_ITERS)
+            assert torch.isfinite(x).all(), "x is not finite"
+            xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
+            assert xHx.item() >= 0, "xHx is negative"
+            alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
+            step_direction = x * alpha
+            assert torch.isfinite(step_direction).all(), "step_direction is not finite"
+            grads = -sam_grads
+
+        else:
             temp_distribution = policy.actor(data["obs"], data["risk"])
             log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
             ratio = torch.exp(log_prob - data["log_prob"])
-            loss_before = -(ratio * advantage).mean().item()
-        
-        # Get SAM gradients at perturbed point
-        sam_grads, perturbed_params = compute_sam_gradients(policy, data, advantage, rho=args.sam_rho)
-        
-        # Use SAM gradients for TRPO update
-        x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, -sam_grads, CONJUGATE_GRADIENT_ITERS)
-        assert torch.isfinite(x).all(), "x is not finite"
-        xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
-        assert xHx.item() >= 0, "xHx is negative"
-        alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
-        step_direction = x * alpha
-        assert torch.isfinite(step_direction).all(), "step_direction is not finite"
+            loss_pi = -(ratio * advantage).mean()
+            loss_before = loss_pi.item()
+            old_distribution = policy.actor(data["obs"], data["risk"])
 
+            loss_pi.backward()
+
+            grads = -get_flat_gradients_from(policy.actor)
+            x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, grads, CONJUGATE_GRADIENT_ITERS)
+            assert torch.isfinite(x).all(), "x is not finite"
+            xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
+            assert xHx.item() >= 0, "xHx is negative"
+            alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
+            step_direction = x * alpha
+            assert torch.isfinite(step_direction).all(), "step_direction is not finite"
         step_frac = 1.0
         # Change expected objective function gradient = expected_imrpove best this moment
-        expected_improve = sam_grads.dot(step_direction)
+        expected_improve = grads.dot(step_direction)
 
         final_kl = 0.0
 
@@ -763,14 +679,21 @@ def main(args, cfg_env=None):
                 "Misc/Alpha": alpha.item(),
                 "Misc/FinalStepNorm": torch.norm(step_direction).mean().item(),
                 "Misc/xHx": xHx.item(),
-                "Misc/gradient_norm": torch.norm(sam_grads).mean().item(),
+                "Misc/gradient_norm": torch.norm(grads).mean().item(),
                 "Misc/H_inv_g": x.norm().item(),
                 "Misc/AcceptanceStep": acceptance_step,
                 "Loss/Loss_actor": loss_pi.mean().item(),
                 "Train/KL": final_kl,
             },
         )
-
+        if args.use_sam_actor and cos_sim is not None and effective_rho is not None and scale_along_grad is not None:
+            logger.store(
+                **{
+                    "Misc/CosineSimilarity": cos_sim,
+                    "Misc/EffectiveRho": effective_rho,
+                    "Misc/ScaleAlongGrad": scale_along_grad,
+                }
+            )
         dataloader = DataLoader(
             dataset=TensorDataset(
                 data["obs"],
@@ -788,51 +711,69 @@ def main(args, cfg_env=None):
                 target_value_r_b,
                 target_value_c_b,
             ) in dataloader:
-                risk_b = risk_b if args.use_risk else None
-                
-                # Update reward critic with SAM
-                reward_critic_optimizer.zero_grad()
-                sam_grads_r, _ = compute_sam_gradients_critic(
-                    policy.reward_critic, 
-                    {"obs": obs_b, "risk": risk_b}, 
-                    target_value_r_b,
-                    rho=args.sam_rho
-                )
-                for name, param in policy.reward_critic.named_parameters():
-                    if name in sam_grads_r:
-                        param.grad = sam_grads_r[name]
-                if config.get("use_critic_norm", True):
-                    for param in policy.reward_critic.parameters():
-                        if param.grad is not None:
-                            param.grad += param * 0.001
-                clip_grad_norm_(policy.reward_critic.parameters(), config["max_grad_norm"])
-                reward_critic_optimizer.step()
-                
-                # Update cost critic with SAM
-                cost_critic_optimizer.zero_grad()
-                sam_grads_c, _ = compute_sam_gradients_critic(
-                    policy.cost_critic, 
-                    {"obs": obs_b, "risk": risk_b}, 
-                    target_value_c_b,
-                    rho=args.sam_rho
-                )
-                for name, param in policy.cost_critic.named_parameters():
-                    if name in sam_grads_c:
-                        param.grad = sam_grads_c[name]
-                if config.get("use_critic_norm", True):
-                    for param in policy.cost_critic.parameters():
-                        if param.grad is not None:
-                            param.grad += param * 0.001
-                clip_grad_norm_(policy.cost_critic.parameters(), config["max_grad_norm"])
-                cost_critic_optimizer.step()
+                if args.use_sam_critic:
+                    risk_b = risk_b if args.use_risk else None
+                    
+                    # Update reward critic with SAM
+                    reward_critic_optimizer.zero_grad()
+                    sam_grads_r, _ = compute_sam_gradients_critic(
+                        policy.reward_critic, 
+                        {"obs": obs_b, "risk": risk_b}, 
+                        target_value_r_b,
+                        rho=args.sam_rho
+                    )
+                    for name, param in policy.reward_critic.named_parameters():
+                        if name in sam_grads_r:
+                            param.grad = sam_grads_r[name]
+                    if config.get("use_critic_norm", True):
+                        for param in policy.reward_critic.parameters():
+                            if param.grad is not None:
+                                param.grad += param * 0.001
+                    clip_grad_norm_(policy.reward_critic.parameters(), config["max_grad_norm"])
+                    reward_critic_optimizer.step()
+                    
+                    # Update cost critic with SAM
+                    cost_critic_optimizer.zero_grad()
+                    sam_grads_c, _ = compute_sam_gradients_critic(
+                        policy.cost_critic, 
+                        {"obs": obs_b, "risk": risk_b}, 
+                        target_value_c_b,
+                        rho=args.sam_rho
+                    )
+                    for name, param in policy.cost_critic.named_parameters():
+                        if name in sam_grads_c:
+                            param.grad = sam_grads_c[name]
+                    if config.get("use_critic_norm", True):
+                        for param in policy.cost_critic.parameters():
+                            if param.grad is not None:
+                                param.grad += param * 0.001
+                    clip_grad_norm_(policy.cost_critic.parameters(), config["max_grad_norm"])
+                    cost_critic_optimizer.step()
 
-                # Compute losses for logging
-                with torch.no_grad():
-                    value_r = policy.reward_critic(obs_b, risk_b)
-                    value_c = policy.cost_critic(obs_b, risk_b)
-                    loss_r = nn.functional.mse_loss(value_r, target_value_r_b)
-                    loss_c = nn.functional.mse_loss(value_c, target_value_c_b)
-
+                    # Compute losses for logging
+                    with torch.no_grad():
+                        value_r = policy.reward_critic(obs_b, risk_b)
+                        value_c = policy.cost_critic(obs_b, risk_b)
+                        loss_r = nn.functional.mse_loss(value_r, target_value_r_b)
+                        loss_c = nn.functional.mse_loss(value_c, target_value_c_b)
+                else:
+                    risk_b = risk_b if args.use_risk else None
+                    reward_critic_optimizer.zero_grad()
+                    loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
+                    cost_critic_optimizer.zero_grad()
+                    loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk_b), target_value_c_b)
+                    if config.get("use_critic_norm", True):
+                        for param in policy.reward_critic.parameters():
+                            loss_r += param.pow(2).sum() * 0.001
+                        for param in policy.cost_critic.parameters():
+                            loss_c += param.pow(2).sum() * 0.001
+                    total_loss = 2*loss_r + loss_c \
+                        if config.get("use_value_coefficient", False) \
+                        else loss_r + loss_c
+                    total_loss.backward()
+                    clip_grad_norm_(policy.parameters(), config["max_grad_norm"])
+                    reward_critic_optimizer.step()
+                    cost_critic_optimizer.step()
                 logger.store(
                     **{
                         "Loss/Loss_reward_critic": loss_r.mean().item(),
@@ -854,6 +795,10 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpCost")
             logger.log_tabular("Metrics/TotalCost")
             logger.log_tabular("Metrics/EpLen")
+            logger.log_tabular("Metrics/EpSuccess")
+            logger.log_tabular("Metrics/EpSuccessStd")
+            logger.log_tabular("Metrics/EpRetStd")
+            logger.log_tabular("Metrics/EpCostStd")
             #logger.log_tabular("Metrics/EpGoal")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")
@@ -948,8 +893,9 @@ if __name__ == "__main__":
     args, cfg_env = single_agent_args()
     import wandb
     run = wandb.init(config=vars(args), entity="kaustubh95",
-                project="conservatism_rl",
-                monitor_gym=True,
+                project="conservatism_in_rl",
+                settings=wandb.Settings(_service_wait=60),
+                # monitor_gym=True,
                 sync_tensorboard=True, save_code=True)
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])

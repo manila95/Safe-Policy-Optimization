@@ -194,6 +194,12 @@ def single_agent_args():
         {"name": "--use-actor-layer-norm", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use layer normalization in the actor network"},
         {"name": "--use-critic-layer-norm", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use layer normalization in the critic networks"},
         {"name": "--sam-rho", "type": float, "default": 0.05, "help": "SAM perturbation radius"},
+        {"name": "--use-sam-actor", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use SAM for actor update"},
+        {"name": "--use-sam-critic", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use SAM for critic update"},
+        {"name": "--sam-type", "type": str, "default": "v1", "help": "SAM type"},
+        {"name": "--use-kl", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use KL for SAM"},
+        {"name": "--perturbation-target-kl", "type": float, "default": 0.01, "help": "Target KL for SAM"},
+        {"name": "--record-gif", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to record GIF"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

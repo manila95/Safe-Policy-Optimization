@@ -185,10 +185,10 @@ def main(args, cfg_env=None):
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = make_sa_mujoco_env(
-            num_envs=args.num_envs, env_id=args.task, seed=args.seed
+            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        eval_env, _, _ = make_sa_mujoco_env(num_envs=1, env_id=args.task, seed=None)
-        config = default_cfg
+        eval_env, _, _ = make_sa_mujoco_env(args, num_envs=1, env_id=args.task, seed=None)
+        config = default_cfg    
 
     else:
         sim_params = parse_sim_params(cfg_env, None)

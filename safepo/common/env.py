@@ -30,9 +30,9 @@ from typing import Callable
 import safety_gymnasium
 from safety_gymnasium.wrappers import SafeAutoResetWrapper, SafeRescaleAction, SafeUnsqueeze
 from safety_gymnasium.vector.async_vector_env import SafetyAsyncVectorEnv
-from safepo.common.wrappers import ShareSubprocVecEnv, ShareDummyVecEnv, ShareEnv, SafeNormalizeObservation, MultiGoalEnv
+from safepo.common.wrappers import ShareSubprocVecEnv, ShareDummyVecEnv, ShareEnv, SafeNormalizeObservation, MultiGoalEnv, EnvWrapper
 
-def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
+def make_sa_mujoco_env(args, num_envs: int, env_id: str, seed: int|None = None):
     """
     Creates and wraps an environment based on the specified parameters.
 
@@ -59,6 +59,7 @@ def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int|None = None):
         def create_env() -> Callable:
             """Creates an environment that can enable or disable the environment checker."""
             env = safety_gymnasium.make(env_id)
+            env = EnvWrapper(env, cost_limit=args.cost_limit, max_time_steps=1000)
             env = SafeRescaleAction(env, -1.0, 1.0)
             return env
         env_fns = [create_env for _ in range(num_envs)]

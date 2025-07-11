@@ -39,6 +39,74 @@ try :
 except ImportError:
     pass
 
+
+from gymnasium import Wrapper
+
+class EnvWrapper(Wrapper):
+    """
+    A simple environment wrapper that allows modification of __init__ and reset functions.
+    Inherits from gymnasium.Wrapper.
+    """
+    def observation_space(self):
+        """
+        Returns the modified observation space to account for the additional cost_limit and time_limit features.
+        """
+        orig_obs_space = self.env.observation_space
+        if isinstance(orig_obs_space, Box):
+            low = np.concatenate([orig_obs_space.low, np.array([0.0, 0.0], dtype=np.float32)], axis=-1)
+            high = np.concatenate([orig_obs_space.high, np.array([self.cost_limit, self.max_time_steps], dtype=np.float32)], axis=-1)
+            return Box(low=low, high=high, dtype=np.float32)
+        else:
+            # If not a Box space, fallback to original
+            return orig_obs_space
+
+    @property
+    def observation_space(self):
+        return self._observation_space
+
+    def __post_init__(self):
+        # Set the new observation space after wrapping
+        self._observation_space = self.observation_space()
+
+    def __init__(self, env, cost_limit, max_time_steps, *args, **kwargs):
+        super().__init__(env)
+        self.cost_limit = cost_limit
+        self.ep_cost = 0.0
+        self.time_step = 0
+        self.max_time_steps = max_time_steps
+
+        orig_obs_space = self.env.observation_space
+        low = np.concatenate([orig_obs_space.low, np.array([0.0, 0.0], dtype=np.float32)], axis=-1)
+        high = np.concatenate([orig_obs_space.high, np.array([self.cost_limit, self.max_time_steps], dtype=np.float32)], axis=-1)
+        self._observation_space = Box(low=low, high=high, dtype=np.float32)
+
+    def reset(self, **kwargs):
+        """
+        Reset the environment.
+        You can modify the reset behavior or returned observation here.
+        """
+        obs, info = self.env.reset(**kwargs)
+        self.ep_cost = 0.0
+        self.time_step = 0
+
+        obs = np.concatenate([obs, np.array([self.cost_limit-self.ep_cost, self.max_time_steps-self.time_step], dtype=np.float32)], axis=-1)
+        # Custom post-processing of obs or info can go here
+        return obs, info
+
+    def step(self, action):
+        """
+        Take a step in the environment.
+        You can modify the action, observation, reward, etc. here.
+        """
+        obs, reward, cost, terminated, truncated, info = self.env.step(action)
+        self.ep_cost += cost
+        self.time_step += 1
+
+        obs = np.concatenate([obs, np.array([self.cost_limit-self.ep_cost, self.max_time_steps-self.time_step], dtype=np.float32)], axis=-1)
+
+        return obs, reward, cost, terminated, truncated, info
+
+
 class SafeNormalizeObservation(NormalizeObservation):
     """This wrapper will normalize observations as Gymnasium's NormalizeObservation wrapper does."""
 

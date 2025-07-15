@@ -323,8 +323,12 @@ def main(args, cfg_env=None):
                 success = 0
             else:
                 next_obs, reward, terminated, truncated, info = env.step(action)
-                cost = info["cost"]
-                success = info["success"]
+                try:
+                    cost = info["cost"]
+                    success = info["success"]
+                except:
+                    cost = terminated
+                    success = 0
 
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost

@@ -154,7 +154,7 @@ def compute_sam_gradients_v1(fvp, policy, data, advantage_lag, advantage_cost, a
             continue
         param.data.sub_(e_w)
     
-    return sam_grads, perturbed_params
+    return sam_grads, perturbed_params, None, None, None
 
 def compute_sam_gradients_v2(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10):
     """Compute Sharpness Aware Minimization gradients.
@@ -207,7 +207,7 @@ def compute_sam_gradients_v2(fvp, policy, data, advantage_lag, advantage_cost, a
             continue
         param.data.sub_(e_w)
     
-    return sam_grads, perturbed_params
+    return sam_grads, perturbed_params, None, None, None
 
 def compute_sam_gradients_v3(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10):
     """Compute Sharpness Aware Minimization gradients.
@@ -260,7 +260,7 @@ def compute_sam_gradients_v3(fvp, policy, data, advantage_lag, advantage_cost, a
             continue
         param.data.sub_(e_w)
     
-    return sam_grads, perturbed_params
+    return sam_grads, perturbed_params, None, None, None
 
 
 def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):

@@ -123,7 +123,7 @@ class SafeGymRobotAutoResetWrapper(AutoResetWrapper):
             env (gym.Env): The environment to apply the wrapper
         """  # pylint: disable=line-too-long
         obs, reward, terminated, truncated, info = self.env.step(action)
-        cost = info["cost"]
+        # cost = info["cost"]
         if terminated or truncated:
             new_obs, new_info = self.env.reset()
             assert (

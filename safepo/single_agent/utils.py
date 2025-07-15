@@ -79,7 +79,10 @@ def rollout_policy(
                 next_obs, reward, terminated, truncated, info = env.step(
                     action.detach().cpu().numpy()
                 )
-                cost = info["cost"]
+                try:
+                    cost = info["cost"]
+                except:
+                    cost = terminated
                 
             episode_rewards.append(torch.as_tensor(reward, dtype=torch.float32, device=device))
             episode_costs.append(torch.as_tensor(cost, dtype=torch.float32, device=device))
@@ -109,7 +112,6 @@ def rollout_policy(
         if episodes_completed >= num_episodes:
             break
             
-    print(torch.sum(torch.stack(episode_data["costs"])))
     return episode_data
 
 def calculate_monte_carlo_returns_from_rollouts(
@@ -191,7 +193,8 @@ def calculate_correlation(
 def create_value_scatter_plot(
     value_estimates: torch.Tensor,
     monte_carlo_returns: torch.Tensor,
-    title: str
+    title: str,
+    timesteps: Optional[torch.Tensor] = None
 ) -> plt.Figure:
     """
     Create a scatter plot comparing value estimates and MC returns.
@@ -200,6 +203,7 @@ def create_value_scatter_plot(
         value_estimates: Tensor of predicted values
         monte_carlo_returns: Tensor of Monte Carlo returns
         title: Plot title
+        timesteps: Optional tensor of timesteps for coloring points
         
     Returns:
         matplotlib Figure object for wandb logging
@@ -211,8 +215,19 @@ def create_value_scatter_plot(
     # Create figure
     fig = plt.figure(figsize=(10, 8))
     
-    # Create scatter plot with regression line
-    plt.scatter(returns_np, values_np, alpha=0.2)
+    if timesteps is not None:
+        # Convert timesteps to numpy and flatten
+        timesteps_np = timesteps.detach().cpu().numpy().flatten()
+        
+        # Create scatter plot with timestep-based coloring
+        scatter = plt.scatter(returns_np, values_np, c=timesteps_np, alpha=0.6, cmap='viridis')
+        
+        # Add colorbar
+        cbar = plt.colorbar(scatter)
+        cbar.set_label('Timestep')
+    else:
+        # Create scatter plot without coloring
+        plt.scatter(returns_np, values_np, alpha=0.2)
     
     # Calculate correlations
     corr = calculate_correlation(value_estimates, monte_carlo_returns)
@@ -221,7 +236,6 @@ def create_value_scatter_plot(
     plt.title(f'{title}\nPearson: {corr["pearson_corr"]:.3f}, Spearman: {corr["spearman_corr"]:.3f}')
     plt.xlabel('Monte Carlo Returns')
     plt.ylabel('Predicted Values')
-    # plt.legend()
     
     return fig
 
@@ -230,7 +244,8 @@ def evaluate_value_estimation_error(
     monte_carlo_returns: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
     create_plot: bool = False,
-    plot_title: str = ""
+    plot_title: str = "",
+    timesteps: Optional[torch.Tensor] = None
 ) -> Dict[str, float]:
     """
     Calculate metrics to evaluate value function estimation bias.
@@ -241,6 +256,7 @@ def evaluate_value_estimation_error(
         mask: Optional tensor to mask certain timesteps
         create_plot: Whether to create scatter plot
         plot_title: Title for the scatter plot
+        timesteps: Optional tensor of timesteps for coloring points
         
     Returns:
         Dictionary containing evaluation metrics and optionally the plot figure
@@ -248,6 +264,8 @@ def evaluate_value_estimation_error(
     if mask is not None:
         value_estimates = value_estimates[mask]
         monte_carlo_returns = monte_carlo_returns[mask]
+        if timesteps is not None:
+            timesteps = timesteps[mask]
     
     # Calculate errors
     errors = value_estimates - monte_carlo_returns
@@ -273,7 +291,8 @@ def evaluate_value_estimation_error(
         plot_fig = create_value_scatter_plot(
             value_estimates,
             monte_carlo_returns,
-            plot_title
+            plot_title,
+            timesteps
         )
     
     # Calculate value statistics
@@ -346,12 +365,21 @@ def evaluate_critic_performance_from_rollouts(
     all_reward_returns = torch.cat(returns['reward_returns'])
     all_cost_returns = torch.cat(returns['cost_returns'])
     
+    # Create timestep information for coloring
+    timesteps_list = []
+    for ep_idx, episode_values in enumerate(episode_data['value_r']):
+        seq_len = len(episode_values)
+        episode_timesteps = torch.arange(seq_len, device=device)
+        timesteps_list.append(episode_timesteps)
+    all_timesteps = torch.cat(timesteps_list)
+    
     # Evaluate reward critic
     reward_metrics = evaluate_value_estimation_error(
         all_value_r,
         all_reward_returns,
         create_plot=create_plots,
-        plot_title="Reward Value Estimates vs MC Returns"
+        plot_title="Reward Value Estimates vs MC Returns",
+        timesteps=all_timesteps
     )
     
     # Evaluate cost critic
@@ -359,7 +387,8 @@ def evaluate_critic_performance_from_rollouts(
         all_value_c,
         all_cost_returns,
         create_plot=create_plots,
-        plot_title="Cost Value Estimates vs MC Returns"
+        plot_title="Cost Value Estimates vs MC Returns",
+        timesteps=all_timesteps
     )
     
     return {
@@ -403,7 +432,8 @@ def calculate_monte_carlo_returns(
 
 def evaluate_critic_performance(
     buffer_data: Dict[str, torch.Tensor],
-    gamma: float = 0.99
+    gamma: float = 0.99,
+    create_plots: bool = False
 ) -> Dict[str, Dict[str, float]]:
     """
     Evaluate both reward and cost critic performance using Monte Carlo returns.
@@ -416,6 +446,7 @@ def evaluate_critic_performance(
             - 'value_r': Tensor of reward value estimates
             - 'value_c': Tensor of cost value estimates
         gamma: Discount factor
+        create_plots: Whether to create scatter plots with timestep coloring
         
     Returns:
         Dictionary containing evaluation metrics for both reward and cost critics
@@ -428,16 +459,28 @@ def evaluate_critic_performance(
         gamma
     )
     
+    # Create timestep information for coloring if plots are requested
+    timesteps = None
+    if create_plots:
+        batch_size, seq_len = buffer_data['reward'].shape
+        timesteps = torch.arange(seq_len, device=buffer_data['reward'].device).unsqueeze(0).expand(batch_size, seq_len)
+    
     # Evaluate reward critic
     reward_metrics = evaluate_value_estimation_error(
         buffer_data['value_r'],
-        reward_returns
+        reward_returns,
+        create_plot=create_plots,
+        plot_title="Reward Value Estimates vs MC Returns",
+        timesteps=timesteps
     )
     
     # Evaluate cost critic
     cost_metrics = evaluate_value_estimation_error(
         buffer_data['value_c'],
-        cost_returns
+        cost_returns,
+        create_plot=create_plots,
+        plot_title="Cost Value Estimates vs MC Returns",
+        timesteps=timesteps
     )
     
     return {

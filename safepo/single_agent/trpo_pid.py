@@ -89,6 +89,8 @@ def actor_sam_fn(args):
             return compute_sam_gradients_v3_kl
         else:
             return compute_sam_gradients_v3
+    elif args.sam_type == "v4":
+        return compute_sam_gradients_v4
     else:
         raise ValueError(f"Invalid SAM type: {args.sam_type}")
 
@@ -271,6 +273,7 @@ def main(args, cfg_env=None):
         pid_kd=args.pid_kd,
         pid_ki=args.pid_ki,
         pid_kp=args.pid_kp,
+        penalty_max=args.lagrangian_multiplier_init*100,
     )
     # set up the logger
     dict_args = vars(args)
@@ -452,7 +455,7 @@ def main(args, cfg_env=None):
                 num_episodes=int(100 / args.num_envs),
                 max_ep_len=1000,  # Maximum episode length
                 device=device,
-                gamma=config['gamma'],
+                gamma=config['gamma'], 
                 use_risk=args.use_risk,
                 risk_model=risk_train.model if args.use_risk else None,
                 create_plots=True
@@ -593,7 +596,8 @@ def main(args, cfg_env=None):
             sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad = actor_sam_fn(args)(
                 fvp, policy, data, advantage, data["adv_c"], data["adv_r"],
                 rho=args.sam_rho, 
-                target_kl=args.perturbation_target_kl
+                target_kl=args.perturbation_target_kl,
+                num_samples=args.sam_num_samples,
             )
             # Use SAM gradients for TRPO update
             x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, -sam_grads, CONJUGATE_GRADIENT_ITERS)
@@ -720,12 +724,20 @@ def main(args, cfg_env=None):
                     
                     # Update reward critic with SAM
                     reward_critic_optimizer.zero_grad()
-                    sam_grads_r, _ = compute_sam_gradients_critic(
-                        policy.reward_critic, 
-                        {"obs": obs_b, "risk": risk_b}, 
-                        target_value_r_b,
-                        rho=args.sam_rho
-                    )
+                    if args.sam_type == "v4":
+                        sam_grads_r, _ = compute_sam_gradients_critic_v4(
+                            policy.reward_critic, 
+                            {"obs": obs_b, "risk": risk_b}, 
+                            target_value_r_b,
+                            rho=args.sam_rho, 
+                            num_samples=args.sam_num_samples
+                        )
+                    else:
+                        sam_grads_r, _ = compute_sam_gradients_critic(
+                            policy.reward_critic, 
+                            {"obs": obs_b, "risk": risk_b}, 
+                            target_value_r_b,
+                            rho=args.sam_rho)
                     for name, param in policy.reward_critic.named_parameters():
                         if name in sam_grads_r:
                             param.grad = sam_grads_r[name]
@@ -738,12 +750,19 @@ def main(args, cfg_env=None):
                     
                     # Update cost critic with SAM
                     cost_critic_optimizer.zero_grad()
-                    sam_grads_c, _ = compute_sam_gradients_critic(
-                        policy.cost_critic, 
-                        {"obs": obs_b, "risk": risk_b}, 
-                        target_value_c_b,
-                        rho=args.sam_rho
-                    )
+                    if args.sam_type == "v4":
+                        sam_grads_c, _ = compute_sam_gradients_critic_v4(
+                            policy.cost_critic, 
+                            {"obs": obs_b, "risk": risk_b}, 
+                            target_value_c_b,
+                            rho=args.sam_rho
+                        )
+                    else:
+                        sam_grads_c, _ = compute_sam_gradients_critic(
+                            policy.cost_critic, 
+                            {"obs": obs_b, "risk": risk_b}, 
+                            target_value_c_b,
+                            rho=args.sam_rho)
                     for name, param in policy.cost_critic.named_parameters():
                         if name in sam_grads_c:
                             param.grad = sam_grads_c[name]

@@ -17,8 +17,18 @@
 from __future__ import annotations
 
 from collections import deque
+import math
 
 import torch
+
+
+def is_valid_number(x) -> bool:
+    """Check if a value is a valid finite number (not nan or inf)."""
+    if not isinstance(x, (int, float)):
+        return False
+    if isinstance(x, float):
+        return not (math.isnan(x) or math.isinf(x))
+    return True
 
 
 class Lagrange:
@@ -97,12 +107,61 @@ class Lagrange:
         """
         self.lambda_optimizer.zero_grad()
         lambda_loss = self.compute_lambda_loss(Jc)
+        
+        # Add debugging information
+        constraint_violation = Jc - self.cost_limit
+        current_lambda = self._lagrangian_multiplier.item()
+        
         lambda_loss.backward()
+        
+        # Check for gradient issues
+        if self._lagrangian_multiplier.grad is not None:
+            grad_norm = self._lagrangian_multiplier.grad.norm().item()
+            if grad_norm > 10.0:  # Clip large gradients
+                self._lagrangian_multiplier.grad.clamp_(-10.0, 10.0)
+        
         self.lambda_optimizer.step()
-        self._lagrangian_multiplier.data.clamp_(
-            0.0,
-            self.lagrangian_upper_bound,
-        )  # enforce: lambda in [0, inf]
+        
+        # More careful clamping - only clamp to upper bound if specified
+        if self.lagrangian_upper_bound is not None:
+            self._lagrangian_multiplier.data.clamp_(
+                0.0,
+                self.lagrangian_upper_bound,
+            )
+        else:
+            # Only ensure non-negativity, don't clamp to 0 aggressively
+            self._lagrangian_multiplier.data.clamp_(min=0.0)
+        
+        # Debug output (you can remove this in production)
+        new_lambda = self._lagrangian_multiplier.item()
+        if new_lambda == 0.0 and constraint_violation > 0.0:
+            print(f"WARNING: Lambda became 0 despite constraint violation!")
+            print(f"  Cost: {Jc:.4f}, Limit: {self.cost_limit:.4f}, Violation: {constraint_violation:.4f}")
+            print(f"  Old lambda: {current_lambda:.6f}, New lambda: {new_lambda:.6f}")
+            print(f"  Loss: {lambda_loss.item():.6f}, Grad norm: {grad_norm if 'grad_norm' in locals() else 'N/A'}")
+
+    def get_debug_info(self, current_cost: float) -> dict:
+        """Get debug information about the current state of the Lagrange multiplier.
+        
+        Args:
+            current_cost: the current episode cost
+            
+        Returns:
+            dictionary containing debug information
+        """
+        constraint_violation = current_cost - self.cost_limit
+        lambda_value = self.lagrangian_multiplier
+        
+        return {
+            'cost': current_cost,
+            'cost_limit': self.cost_limit,
+            'constraint_violation': constraint_violation,
+            'lambda_value': lambda_value,
+            'lambda_parameter': self._lagrangian_multiplier.item(),
+            'lambda_upper_bound': self.lagrangian_upper_bound,
+            'lambda_lr': self.lagrangian_multiplier_lr,
+            'should_increase': constraint_violation > 0.0 and lambda_value == 0.0,
+        }
 
 
 class PIDLagrangian:
@@ -180,21 +239,119 @@ class PIDLagrangian:
         return self._cost_penalty
 
     def update_lagrange_multiplier(self, ep_cost_avg: float) -> None:
+        # Handle nan input - this is the root cause of the issue
+        if not is_valid_number(ep_cost_avg):
+            print(f"WARNING: Invalid ep_cost_avg received: {ep_cost_avg}, using previous penalty value")
+            # Keep the previous penalty value and don't update anything
+            return
+        
         delta = float(ep_cost_avg - self._cost_limit)
-        self._pid_i = max(0.0, self._pid_i + delta * self._pid_ki)
+        
+        # Store previous values for debugging
+        prev_pid_i = self._pid_i
+        prev_cost_penalty = self._cost_penalty
+        
+        # Update integral term - be more careful about clamping
+        integral_update = delta * self._pid_ki
+        self._pid_i += integral_update
+        
+        # Ensure integral term doesn't become nan
+        if not is_valid_number(self._pid_i):
+            print(f"WARNING: pid_i became invalid: {self._pid_i}, resetting to 0")
+            self._pid_i = 0.0
+        
+        # Only clamp to 0 if the integral term becomes negative AND we're not violating constraints
+        if self._pid_i < 0.0 and delta <= 0.0:
+            self._pid_i = 0.0
+        
         if self._diff_norm:
             self._pid_i = max(0.0, min(1.0, self._pid_i))
+        
         a_p = self._pid_delta_p_ema_alpha
         self._delta_p *= a_p
         self._delta_p += (1 - a_p) * delta
+        
+        # Ensure delta_p doesn't become nan
+        if not is_valid_number(self._delta_p):
+            print(f"WARNING: delta_p became invalid: {self._delta_p}, resetting to 0")
+            self._delta_p = 0.0
+        
         a_d = self._pid_delta_d_ema_alpha
         self._cost_d *= a_d
         self._cost_d += (1 - a_d) * float(ep_cost_avg)
+        
+        # Ensure cost_d doesn't become nan
+        if not is_valid_number(self._cost_d):
+            print(f"WARNING: cost_d became invalid: {self._cost_d}, resetting to 0")
+            self._cost_d = 0.0
+        
         pid_d = max(0.0, self._cost_d - self._cost_ds[0])
+        
+        # Ensure pid_d doesn't become nan
+        if not is_valid_number(pid_d):
+            print(f"WARNING: pid_d became invalid: {pid_d}, resetting to 0")
+            pid_d = 0.0
+            
         pid_o = self._pid_kp * self._delta_p + self._pid_i + self._pid_kd * pid_d
-        self._cost_penalty = max(0.0, pid_o)
+
+        # Check for nan in PID output and handle gracefully
+        if not is_valid_number(pid_o):
+            print(f"WARNING: PID output is nan/inf: {pid_o}, using previous penalty value")
+            # Keep the previous penalty value
+            return
+
+        print(f"PID output: {pid_o:.6f}, Final penalty: {self._cost_penalty:.6f}, Delta: {delta:.6f}, delta_p: {self._delta_p:.6f}, cost_d: {self._cost_d:.6f}, cost_ds: {self._cost_ds[0]:.6f}, pid_d: {pid_d:.6f}, pid_i: {self._pid_i:.6f}, pid_kp: {self._pid_kp:.6f}, pid_ki: {self._pid_ki:.6f}, pid_kd: {self._pid_kd:.6f}")
+        
+        # More careful clamping of the final penalty
+        if pid_o < 0.0 and delta > 0.0:
+            # If we have a constraint violation, don't clamp to 0
+            self._cost_penalty = 0.001  # Small positive value instead of 0
+        else:
+            self._cost_penalty = max(0.0, pid_o)
+        
         if self._diff_norm:
             self._cost_penalty = min(1.0, self._cost_penalty)
         if not (self._diff_norm or self._sum_norm):
             self._cost_penalty = min(self._cost_penalty, self._penalty_max)
-        self._cost_ds.append(self._cost_d)
+        
+        # Only append valid cost_d values to the deque
+        if is_valid_number(self._cost_d):
+            self._cost_ds.append(self._cost_d)
+        else:
+            print(f"WARNING: Not appending invalid cost_d {self._cost_d} to deque")
+        
+        # Debug output (you can remove this in production)
+        if self._cost_penalty == 0.0 and delta > 0.0:
+            print(f"WARNING: PID Lambda became 0 despite constraint violation!")
+            print(f"  Cost: {ep_cost_avg:.4f}, Limit: {self._cost_limit:.4f}, Delta: {delta:.4f}")
+            print(f"  PID components - P: {self._pid_kp * self._delta_p:.6f}, I: {self._pid_i:.6f}, D: {self._pid_kd * pid_d:.6f}")
+            print(f"  PID output: {pid_o:.6f}, Final penalty: {self._cost_penalty:.6f}")
+            print(f"  Previous penalty: {prev_cost_penalty:.6f}, Previous I: {prev_pid_i:.6f}")
+
+    def get_debug_info(self, current_cost: float) -> dict:
+        """Get debug information about the current state of the PID Lagrange multiplier.
+        
+        Args:
+            current_cost: the current episode cost
+            
+        Returns:
+            dictionary containing debug information
+        """
+        delta = current_cost - self._cost_limit
+        
+        return {
+            'cost': current_cost,
+            'cost_limit': self._cost_limit,
+            'constraint_violation': delta,
+            'lambda_value': self._cost_penalty,
+            'pid_i': self._pid_i,
+            'pid_kp': self._pid_kp,
+            'pid_ki': self._pid_ki,
+            'pid_kd': self._pid_kd,
+            'delta_p': self._delta_p,
+            'cost_d': self._cost_d,
+            'sum_norm': self._sum_norm,
+            'diff_norm': self._diff_norm,
+            'penalty_max': self._penalty_max,
+            'should_increase': delta > 0.0 and self._cost_penalty == 0.0,
+        }

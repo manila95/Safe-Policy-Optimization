@@ -200,6 +200,7 @@ def single_agent_args():
         {"name": "--use-kl", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use KL for SAM"},
         {"name": "--perturbation-target-kl", "type": float, "default": 0.01, "help": "Target KL for SAM"},
         {"name": "--record-gif", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to record GIF"},
+        {"name": "--sam-num-samples", "type": int, "default": 10, "help": "Number of samples for SAM"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

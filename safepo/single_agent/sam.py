@@ -103,7 +103,7 @@ def fvp(
     return flat_grad_grad_kl + params * 0.1
 
 
-def compute_sam_gradients_v1(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10):
+def compute_sam_gradients_v1(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10, num_samples=10):
     """Compute Sharpness Aware Minimization gradients.
     
     Args:
@@ -156,7 +156,7 @@ def compute_sam_gradients_v1(fvp, policy, data, advantage_lag, advantage_cost, a
     
     return sam_grads, perturbed_params, None, None, None
 
-def compute_sam_gradients_v2(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10):
+def compute_sam_gradients_v2(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10, num_samples=10):
     """Compute Sharpness Aware Minimization gradients.
     
     Args:
@@ -209,7 +209,7 @@ def compute_sam_gradients_v2(fvp, policy, data, advantage_lag, advantage_cost, a
     
     return sam_grads, perturbed_params, None, None, None
 
-def compute_sam_gradients_v3(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10):
+def compute_sam_gradients_v3(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10, num_samples=10):
     """Compute Sharpness Aware Minimization gradients.
     
     Args:
@@ -263,7 +263,7 @@ def compute_sam_gradients_v3(fvp, policy, data, advantage_lag, advantage_cost, a
     return sam_grads, perturbed_params, None, None, None
 
 
-def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):
+def compute_sam_gradients_critic(critic, data, target_values, rho=0.05, num_samples=10):
     """Compute Sharpness Aware Minimization gradients for critic.
     
     Args:
@@ -439,7 +439,7 @@ def log_gradient_statistics(grads, step_direction, x):
     return cos_sim, effective_rho, scale_along_grad
 
 
-def compute_sam_gradients_v2_kl(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10):
+def compute_sam_gradients_v2_kl(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10, num_samples=10):
     """Compute Sharpness Aware Minimization gradients with KL constraint.
     
     Args:
@@ -498,7 +498,7 @@ def compute_sam_gradients_v2_kl(fvp, policy, data, advantage_lag, advantage_cost
     
     return sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad
 
-def compute_sam_gradients_v1_kl(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10):
+def compute_sam_gradients_v1_kl(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10, num_samples=10):
     """Compute Sharpness Aware Minimization gradients with KL constraint.
     
     Args:
@@ -556,7 +556,7 @@ def compute_sam_gradients_v1_kl(fvp, policy, data, advantage_lag, advantage_cost
     
     return sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad
 
-def compute_sam_gradients_v3_kl(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10):
+def compute_sam_gradients_v3_kl(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10, num_samples=10):
     """Compute Sharpness Aware Minimization gradients with KL constraint.
     
     Args:
@@ -615,7 +615,7 @@ def compute_sam_gradients_v3_kl(fvp, policy, data, advantage_lag, advantage_cost
     return sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad
 
 
-def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):
+def compute_sam_gradients_critic(critic, data, target_values, rho=0.05, num_samples=10):
     """Compute Sharpness Aware Minimization gradients for critic.
     
     Args:
@@ -677,3 +677,153 @@ def compute_sam_gradients_critic(critic, data, target_values, rho=0.05):
             param.data.copy_(orig_param)
     
     return sam_grads, perturbed_params
+
+
+def compute_sam_gradients_critic_v4(critic, data, target_values, rho, num_samples=10):
+    """
+    SAM v4: Samples multiple perturbations uniformly from hypersphere and averages gradients
+    
+    Args:
+        critic: Critic network
+        data: Dictionary containing obs and risk
+        target_values: Target values for critic
+        rho: Size of perturbation
+        num_samples: Number of perturbation samples
+    """
+    # Store original parameters
+    original_params = []
+    for param in critic.parameters():
+        if param.requires_grad:
+            original_params.append(param.data.clone())
+    
+    # Get base gradients and norm
+    critic.zero_grad()
+    value_pred = critic(data["obs"], data["risk"]) 
+    base_loss = nn.functional.mse_loss(value_pred, target_values)
+    base_loss.backward()
+    
+    # Calculate gradient norm
+    grad_norm = 0.0
+    for param in critic.parameters():
+        if param.grad is not None:
+            grad_norm += param.grad.data.norm(2).item() ** 2
+    grad_norm = grad_norm ** 0.5
+    
+    # Store gradients from all perturbations
+    all_grads = {}
+    for name, param in critic.named_parameters():
+        if param.grad is not None:
+            all_grads[name] = []
+    
+    # Sample perturbations and compute gradients
+    for _ in range(num_samples):
+        # Sample random direction on unit sphere
+        random_directions = {}
+        for name, param in critic.named_parameters():
+            if param.grad is not None:
+                random_direction = torch.randn_like(param)
+                random_direction = random_direction / random_direction.norm()
+                random_directions[name] = random_direction
+        
+        # Apply perturbation
+        for name, param in critic.named_parameters():
+            if param.grad is not None:
+                e_w = rho * random_directions[name]
+                param.data.add_(e_w)
+        
+        # Get gradients at perturbed point
+        critic.zero_grad()
+        value_pred = critic(data["obs"], data["risk"])
+        perturbed_loss = nn.functional.mse_loss(value_pred, target_values)
+        perturbed_loss.backward()
+        
+        # Store gradients
+        for name, param in critic.named_parameters():
+            if param.grad is not None:
+                all_grads[name].append(param.grad.clone())
+        
+        # Restore original parameters
+        for param, orig_param in zip(critic.parameters(), original_params):
+            if param.requires_grad:
+                param.data.copy_(orig_param)
+    
+    # Average gradients across perturbations
+    sam_grads = {}
+    for name in all_grads:
+        sam_grads[name] = torch.stack(all_grads[name]).mean(0)
+    
+    return sam_grads, None  # Return None for perturbed_params to match original interface
+
+
+def compute_sam_gradients_v4(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10, num_samples=10):
+    """
+    SAM v4 for policy: Samples multiple perturbations uniformly from hypersphere and averages gradients
+    
+    Args:
+        policy: Policy network
+        data: Dictionary containing obs, risk, act, log_prob
+        advantage_lag: Advantage values
+        rho: Size of perturbation
+        num_samples: Number of perturbation samples
+    """
+    # Store original parameters
+    original_params = []
+    for param in policy.actor.parameters():
+        if param.requires_grad:
+            original_params.append(param.data.clone())
+    
+    # Get base gradients and norm
+    policy.actor.zero_grad()
+    temp_distribution = policy.actor(data["obs"], data["risk"])
+    log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+    ratio = torch.exp(log_prob - data["log_prob"])
+    base_loss = -(ratio * advantage_lag).mean()
+    base_loss.backward()
+    
+    # Calculate gradient norm
+    grad_norm = 0.0
+    for param in policy.actor.parameters():
+        if param.grad is not None:
+            grad_norm += param.grad.data.norm(2).item() ** 2
+    grad_norm = grad_norm ** 0.5
+    
+    # Store gradients from all perturbations
+    all_grads = []
+    
+    # Sample perturbations and compute gradients
+    for _ in range(num_samples):
+        # Sample random direction on unit sphere
+        random_directions = {}
+        for name, param in policy.actor.named_parameters():
+            if param.grad is not None:
+                random_direction = torch.randn_like(param)
+                random_direction = random_direction / random_direction.norm()
+                random_directions[name] = random_direction
+        
+        # Apply perturbation
+        for name, param in policy.actor.named_parameters():
+            if param.grad is not None:
+                e_w = rho * random_directions[name]
+                param.data.add_(e_w)
+        
+        # Get gradients at perturbed point
+        policy.actor.zero_grad()
+        temp_distribution = policy.actor(data["obs"], data["risk"])
+        log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+        ratio = torch.exp(log_prob - data["log_prob"])
+        perturbed_loss = -(ratio * advantage_lag).mean()
+        perturbed_loss.backward()
+        
+        # Store flat gradients
+        flat_grads = get_flat_gradients_from(policy.actor)
+        all_grads.append(flat_grads)
+        
+        # Restore original parameters
+        for param, orig_param in zip(policy.actor.parameters(), original_params):
+            if param.requires_grad:
+                param.data.copy_(orig_param)
+    
+    # Average gradients across perturbations
+    sam_grads = torch.stack(all_grads).mean(0)
+    
+    return sam_grads, None, None, None, None

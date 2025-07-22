@@ -457,7 +457,7 @@ def main(args, cfg_env=None):
                 device=device,
                 gamma=config['gamma'], 
                 use_risk=args.use_risk,
-                risk_model=risk_train.model if args.use_risk else None,
+                risk_model=risk_model if args.use_risk else None,
                 create_plots=True
             )
 
@@ -499,6 +499,42 @@ def main(args, cfg_env=None):
                     "Cost Value/StdMCReturn": critic_metrics['cost_critic']['std_mc_return'],
                     "Cost Value/MinMCReturn": critic_metrics['cost_critic']['min_mc_return'],
                     "Cost Value/MaxMCReturn": critic_metrics['cost_critic']['max_mc_return'],
+                    
+                    # Start state (s0) reward critic metrics
+                    "S0 Reward Value/EstimationError": critic_metrics['s0_performance']['reward_critic']['mean_error'],
+                    "S0 Reward Value/MeanAbsError": critic_metrics['s0_performance']['reward_critic']['mean_abs_error'],
+                    "S0 Reward Value/OverestimationRatio": critic_metrics['s0_performance']['reward_critic']['overestimation_ratio'],
+                    "S0 Reward Value/UnderestimationRatio": critic_metrics['s0_performance']['reward_critic']['underestimation_ratio'],
+                    "S0 Reward Value/MaxError": critic_metrics['s0_performance']['reward_critic']['max_error'],
+                    "S0 Reward Value/PearsonCorr": critic_metrics['s0_performance']['reward_critic']['pearson_corr'],
+                    "S0 Reward Value/SpearmanCorr": critic_metrics['s0_performance']['reward_critic']['spearman_corr'],
+                    "S0 Reward Value/KendallCorr": critic_metrics['s0_performance']['reward_critic']['kendall_corr'],
+                    "S0 Reward Value/MeanPredicted": critic_metrics['s0_performance']['reward_critic']['mean_value'],
+                    "S0 Reward Value/StdPredicted": critic_metrics['s0_performance']['reward_critic']['std_value'],
+                    "S0 Reward Value/MinPredicted": critic_metrics['s0_performance']['reward_critic']['min_value'],
+                    "S0 Reward Value/MaxPredicted": critic_metrics['s0_performance']['reward_critic']['max_value'],
+                    "S0 Reward Value/MeanMCReturn": critic_metrics['s0_performance']['reward_critic']['mean_mc_return'],
+                    "S0 Reward Value/StdMCReturn": critic_metrics['s0_performance']['reward_critic']['std_mc_return'],
+                    "S0 Reward Value/MinMCReturn": critic_metrics['s0_performance']['reward_critic']['min_mc_return'],
+                    "S0 Reward Value/MaxMCReturn": critic_metrics['s0_performance']['reward_critic']['max_mc_return'],
+                    
+                    # Start state (s0) cost critic metrics
+                    "S0 Cost Value/EstimationError": critic_metrics['s0_performance']['cost_critic']['mean_error'],
+                    "S0 Cost Value/MeanAbsError": critic_metrics['s0_performance']['cost_critic']['mean_abs_error'],
+                    "S0 Cost Value/OverestimationRatio": critic_metrics['s0_performance']['cost_critic']['overestimation_ratio'],
+                    "S0 Cost Value/UnderestimationRatio": critic_metrics['s0_performance']['cost_critic']['underestimation_ratio'],
+                    "S0 Cost Value/MaxError": critic_metrics['s0_performance']['cost_critic']['max_error'],
+                    "S0 Cost Value/PearsonCorr": critic_metrics['s0_performance']['cost_critic']['pearson_corr'],
+                    "S0 Cost Value/SpearmanCorr": critic_metrics['s0_performance']['cost_critic']['spearman_corr'],
+                    "S0 Cost Value/KendallCorr": critic_metrics['s0_performance']['cost_critic']['kendall_corr'],
+                    "S0 Cost Value/MeanPredicted": critic_metrics['s0_performance']['cost_critic']['mean_value'],
+                    "S0 Cost Value/StdPredicted": critic_metrics['s0_performance']['cost_critic']['std_value'],
+                    "S0 Cost Value/MinPredicted": critic_metrics['s0_performance']['cost_critic']['min_value'],
+                    "S0 Cost Value/MaxPredicted": critic_metrics['s0_performance']['cost_critic']['max_value'],
+                    "S0 Cost Value/MeanMCReturn": critic_metrics['s0_performance']['cost_critic']['mean_mc_return'],
+                    "S0 Cost Value/StdMCReturn": critic_metrics['s0_performance']['cost_critic']['std_mc_return'],
+                    "S0 Cost Value/MinMCReturn": critic_metrics['s0_performance']['cost_critic']['min_mc_return'],
+                    "S0 Cost Value/MaxMCReturn": critic_metrics['s0_performance']['cost_critic']['max_mc_return'],
                 }
             )
 
@@ -516,6 +552,21 @@ def main(args, cfg_env=None):
                 cost_img = wandb.Image(cost_fig)
                 wandb.log({"plots/cost_value_scatter": cost_img})
                 plt.close(cost_fig)
+            
+            # Log s0 plots to wandb
+            if 'plot_fig' in critic_metrics['s0_performance']['reward_critic']:
+                # Convert matplotlib figure to image
+                s0_reward_fig = critic_metrics['s0_performance']['reward_critic']['plot_fig']
+                s0_reward_img = wandb.Image(s0_reward_fig)
+                wandb.log({"plots/s0_reward_value_scatter": s0_reward_img})
+                plt.close(s0_reward_fig)
+            
+            if 'plot_fig' in critic_metrics['s0_performance']['cost_critic']:
+                # Convert matplotlib figure to image
+                s0_cost_fig = critic_metrics['s0_performance']['cost_critic']['plot_fig']
+                s0_cost_img = wandb.Image(s0_cost_fig)
+                wandb.log({"plots/s0_cost_value_scatter": s0_cost_img})
+                plt.close(s0_cost_fig)
         eval_start_time = time.time()
 
         eval_episodes = 1 if epoch < epochs - 1 else 10
@@ -886,6 +937,40 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Cost Value/StdMCReturn")
                 logger.log_tabular("Cost Value/MinMCReturn")
                 logger.log_tabular("Cost Value/MaxMCReturn")
+                
+                # Add s0 performance metrics
+                logger.log_tabular("S0 Reward Value/EstimationError")
+                logger.log_tabular("S0 Reward Value/MeanAbsError")
+                logger.log_tabular("S0 Reward Value/OverestimationRatio")
+                logger.log_tabular("S0 Reward Value/UnderestimationRatio")
+                logger.log_tabular("S0 Reward Value/MaxError")
+                logger.log_tabular("S0 Reward Value/PearsonCorr")
+                logger.log_tabular("S0 Reward Value/SpearmanCorr")
+                logger.log_tabular("S0 Reward Value/KendallCorr")
+                logger.log_tabular("S0 Reward Value/MeanPredicted")
+                logger.log_tabular("S0 Reward Value/StdPredicted")
+                logger.log_tabular("S0 Reward Value/MinPredicted")
+                logger.log_tabular("S0 Reward Value/MaxPredicted")
+                logger.log_tabular("S0 Reward Value/MeanMCReturn")
+                logger.log_tabular("S0 Reward Value/StdMCReturn")
+                logger.log_tabular("S0 Reward Value/MinMCReturn")
+                logger.log_tabular("S0 Reward Value/MaxMCReturn")
+                logger.log_tabular("S0 Cost Value/EstimationError")
+                logger.log_tabular("S0 Cost Value/MeanAbsError")
+                logger.log_tabular("S0 Cost Value/OverestimationRatio")
+                logger.log_tabular("S0 Cost Value/UnderestimationRatio")
+                logger.log_tabular("S0 Cost Value/MaxError")
+                logger.log_tabular("S0 Cost Value/PearsonCorr")
+                logger.log_tabular("S0 Cost Value/SpearmanCorr")
+                logger.log_tabular("S0 Cost Value/KendallCorr")
+                logger.log_tabular("S0 Cost Value/MeanPredicted")
+                logger.log_tabular("S0 Cost Value/StdPredicted")
+                logger.log_tabular("S0 Cost Value/MinPredicted")
+                logger.log_tabular("S0 Cost Value/MaxPredicted")
+                logger.log_tabular("S0 Cost Value/MeanMCReturn")
+                logger.log_tabular("S0 Cost Value/StdMCReturn")
+                logger.log_tabular("S0 Cost Value/MinMCReturn")
+                logger.log_tabular("S0 Cost Value/MaxMCReturn")
             if args.use_risk and args.fine_tune_risk:
                 #try:
                 logger.log_tabular("risk/risk_loss")

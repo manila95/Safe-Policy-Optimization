@@ -391,9 +391,71 @@ def evaluate_critic_performance_from_rollouts(
         timesteps=all_timesteps
     )
     
+    # Evaluate start state (s0) performance
+    s0_metrics = evaluate_start_state_performance(
+        episode_data, returns, create_plots
+    )
+    
     return {
         'reward_critic': reward_metrics,
-        'cost_critic': cost_metrics
+        'cost_critic': cost_metrics,
+        's0_performance': s0_metrics
+    }
+
+def evaluate_start_state_performance(
+    episode_data: Dict[str, List[torch.Tensor]],
+    returns: Dict[str, List[torch.Tensor]],
+    create_plots: bool = False
+) -> Dict[str, Dict[str, float]]:
+    """
+    Evaluate critic performance specifically for start states (s0).
+    
+    Args:
+        episode_data: Dictionary containing lists of tensors from rollout_policy
+        returns: Dictionary containing lists of return tensors
+        create_plots: Whether to create scatter plots
+        
+    Returns:
+        Dictionary containing evaluation metrics for start state performance
+    """
+    # Extract start state values and returns
+    s0_value_r = []
+    s0_value_c = []
+    s0_reward_returns = []
+    s0_cost_returns = []
+    
+    for ep_idx in range(len(episode_data['value_r'])):
+        # Get first timestep (s0) from each episode
+        s0_value_r.append(episode_data['value_r'][ep_idx][0])
+        s0_value_c.append(episode_data['value_c'][ep_idx][0])
+        s0_reward_returns.append(returns['reward_returns'][ep_idx][0])
+        s0_cost_returns.append(returns['cost_returns'][ep_idx][0])
+    
+    # Stack into tensors
+    s0_value_r = torch.stack(s0_value_r)
+    s0_value_c = torch.stack(s0_value_c)
+    s0_reward_returns = torch.stack(s0_reward_returns)
+    s0_cost_returns = torch.stack(s0_cost_returns)
+    
+    # Evaluate reward critic for s0
+    s0_reward_metrics = evaluate_value_estimation_error(
+        s0_value_r,
+        s0_reward_returns,
+        create_plot=create_plots,
+        plot_title="Start State (s0) Reward Value Estimates vs MC Returns"
+    )
+    
+    # Evaluate cost critic for s0
+    s0_cost_metrics = evaluate_value_estimation_error(
+        s0_value_c,
+        s0_cost_returns,
+        create_plot=create_plots,
+        plot_title="Start State (s0) Cost Value Estimates vs MC Returns"
+    )
+    
+    return {
+        'reward_critic': s0_reward_metrics,
+        'cost_critic': s0_cost_metrics
     }
 
 # Keep the original functions for backward compatibility

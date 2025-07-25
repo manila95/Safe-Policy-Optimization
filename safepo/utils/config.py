@@ -201,6 +201,11 @@ def single_agent_args():
         {"name": "--perturbation-target-kl", "type": float, "default": 0.01, "help": "Target KL for SAM"},
         {"name": "--record-gif", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to record GIF"},
         {"name": "--sam-num-samples", "type": int, "default": 10, "help": "Number of samples for SAM"},
+        {"name": "--use-iqn-for-cost", "type": lambda x: bool(strtobool(x)), "default": True, "help": "Whether to use IQN for cost estimation"},
+        {"name": "--iqn-num-quantiles", "type": int, "default": 32, "help": "Number of quantiles for IQN"},
+        {"name": "--iqn-embedding-dim", "type": int, "default": 64, "help": "Embedding dimension for IQN"},
+        {"name": "--iqn-cvar-alpha", "type": float, "default": 0.1, "help": "CVaR alpha level for IQN"},
+        # {"name": "--cvar-alpha", "type": float, "default": 0.1, "help": "CVaR alpha level for CPO"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

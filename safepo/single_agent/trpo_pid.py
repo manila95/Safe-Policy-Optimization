@@ -40,7 +40,7 @@ from safepo.common.buffer import VectorizedOnPolicyBuffer
 from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
 from safepo.common.lagrange import PIDLagrangian as Lagrange
 from safepo.common.logger import EpochLogger
-from safepo.common.model import ActorVCritic
+from safepo.common.model import ActorVCritic, quantile_regression_loss
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
 from safepo.single_agent.utils import *
 from sam import *
@@ -226,6 +226,12 @@ def main(args, cfg_env=None):
         risk_size=risk_size,
         use_actor_layer_norm=args.use_actor_layer_norm,
         use_critic_layer_norm=args.use_critic_layer_norm,
+        use_iqn_for_cost=args.use_iqn_for_cost,
+        iqn_config={
+            'num_quantiles': args.iqn_num_quantiles,
+            'embedding_dim': args.iqn_embedding_dim,
+            'alpha': args.iqn_cvar_alpha
+        } if args.use_iqn_for_cost else None,
     ).to(device)
     reward_critic_optimizer = torch.optim.Adam(
         policy.reward_critic.parameters(), lr=1e-3
@@ -809,11 +815,31 @@ def main(args, cfg_env=None):
                             rho=args.sam_rho
                         )
                     else:
-                        sam_grads_c, _ = compute_sam_gradients_critic(
-                            policy.cost_critic, 
-                            {"obs": obs_b, "risk": risk_b}, 
-                            target_value_c_b,
-                            rho=args.sam_rho)
+                        # For IQN, we need to handle the quantile regression loss differently
+                        if policy.use_iqn_for_cost:
+                            # Sample quantiles for SAM training
+                            batch_size = obs_b.shape[0]
+                            tau = torch.rand(batch_size, policy.cost_critic.num_quantiles, device=obs_b.device)
+                            
+                            # Get predicted quantiles
+                            predicted_quantiles = policy.cost_critic(obs_b, risk_b, tau)
+                            
+                            # Compute quantile regression loss
+                            loss_c = quantile_regression_loss(predicted_quantiles, target_value_c_b, tau)
+                            
+                            # Compute gradients manually for SAM
+                            loss_c.backward()
+                            sam_grads_c = {}
+                            for name, param in policy.cost_critic.named_parameters():
+                                if param.grad is not None:
+                                    sam_grads_c[name] = param.grad.clone()
+                            policy.cost_critic.zero_grad()
+                        else:
+                            sam_grads_c, _ = compute_sam_gradients_critic(
+                                policy.cost_critic, 
+                                {"obs": obs_b, "risk": risk_b}, 
+                                target_value_c_b,
+                                rho=args.sam_rho)
                     for name, param in policy.cost_critic.named_parameters():
                         if name in sam_grads_c:
                             param.grad = sam_grads_c[name]
@@ -827,7 +853,10 @@ def main(args, cfg_env=None):
                     # Compute losses for logging
                     with torch.no_grad():
                         value_r = policy.reward_critic(obs_b, risk_b)
-                        value_c = policy.cost_critic(obs_b, risk_b)
+                        if policy.use_iqn_for_cost:
+                            value_c = policy.cost_critic.get_expected_value(obs_b, risk_b)
+                        else:
+                            value_c = policy.cost_critic(obs_b, risk_b)
                         loss_r = nn.functional.mse_loss(value_r, target_value_r_b)
                         loss_c = nn.functional.mse_loss(value_c, target_value_c_b)
                 else:
@@ -835,7 +864,24 @@ def main(args, cfg_env=None):
                     reward_critic_optimizer.zero_grad()
                     loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
                     cost_critic_optimizer.zero_grad()
-                    loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk_b), target_value_c_b)
+                    
+                    # Handle IQN training for cost critic
+                    if policy.use_iqn_for_cost:
+                        # Sample quantiles for training
+                        batch_size = obs_b.shape[0]
+                        tau = torch.rand(batch_size, policy.cost_critic.num_quantiles, device=obs_b.device)
+                        
+                        # Get predicted quantiles
+                        predicted_quantiles = policy.cost_critic(obs_b, risk_b, tau)
+                        
+                        # For IQN training, we use the actual cost returns as targets
+                        # The target_value_c_b from buffer contains the actual cost returns
+                        # We train the IQN to predict the quantiles of the cost distribution
+                        # The quantile regression loss will ensure that each quantile is estimated correctly
+                        loss_c = quantile_regression_loss(predicted_quantiles, target_value_c_b, tau)
+                    else:
+                        loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk_b), target_value_c_b)
+                    
                     if config.get("use_critic_norm", True):
                         for param in policy.reward_critic.parameters():
                             loss_r += param.pow(2).sum() * 0.001

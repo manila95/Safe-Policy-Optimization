@@ -45,6 +45,7 @@ from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_para
 from safepo.single_agent.utils import *
 from sam import *
 
+
 CONJUGATE_GRADIENT_ITERS=15
 TRPO_SEARCHING_STEPS=15
 
@@ -266,7 +267,15 @@ def main(args, cfg_env=None):
         num_envs=args.num_envs,
         gamma=config["gamma"],
     )
-    # setup lagrangian multiplier
+    
+    # Initialize epistemic uncertainty measurer
+    uncertainty_measurer = EpistemicUncertaintyMeasurer(
+        obs_dim=obs_space.shape[0],
+        device=device,
+        hidden_sizes=[64, 64]
+    )
+    
+    # setup lagrange multiplier
     lagrange = Lagrange(
         cost_limit=args.cost_limit,
         lagrangian_multiplier_init=args.lagrangian_multiplier_init,
@@ -446,6 +455,26 @@ def main(args, cfg_env=None):
                         last_value_r=last_value_r, last_value_c=last_value_c, idx=idx
                     )
         rollout_end_time = time.time()
+        
+        # Measure epistemic uncertainty from buffer data
+        data = buffer.get()
+        uncertainty_stats = measure_epistemic_uncertainty_from_buffer(
+            buffer_data=data,
+            uncertainty_measurer=uncertainty_measurer,
+            update_predictor=True
+        )
+        
+        # Log uncertainty statistics
+        logger.store(
+            **{
+                "Uncertainty/MeanEpistemic": uncertainty_stats['mean_uncertainty'],
+                "Uncertainty/StdEpistemic": uncertainty_stats['std_uncertainty'],
+                "Uncertainty/MinEpistemic": uncertainty_stats['min_uncertainty'],
+                "Uncertainty/MaxEpistemic": uncertainty_stats['max_uncertainty'],
+                "Uncertainty/MedianEpistemic": uncertainty_stats['median_uncertainty'],
+            }
+        )
+
         if epoch % 20 == 0:
             # Evaluate critic performance using fresh rollouts
             critic_metrics = evaluate_critic_performance_from_rollouts(
@@ -457,7 +486,7 @@ def main(args, cfg_env=None):
                 device=device,
                 gamma=config['gamma'], 
                 use_risk=args.use_risk,
-                risk_model=risk_train.model if args.use_risk else None,
+                risk_model=risk_model if args.use_risk else None,
                 create_plots=True
             )
 
@@ -584,6 +613,12 @@ def main(args, cfg_env=None):
         advantage = data["adv_r"] - lagrange.lagrangian_multiplier * data["adv_c"]
         advantage /= (lagrange.lagrangian_multiplier + 1)
         
+        # Compute SAM rho with decay
+        if args.use_sam_decay:
+            sam_rho = get_sam_rho_with_decay(args, epoch, epochs)
+        else:
+            sam_rho = args.sam_rho
+        
         # Compute initial loss before any updates
         if args.use_sam_actor:
             with torch.no_grad():
@@ -595,7 +630,7 @@ def main(args, cfg_env=None):
             # Get SAM gradients at perturbed point
             sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad = actor_sam_fn(args)(
                 fvp, policy, data, advantage, data["adv_c"], data["adv_r"],
-                rho=args.sam_rho, 
+                rho=sam_rho, 
                 target_kl=args.perturbation_target_kl,
                 num_samples=args.sam_num_samples,
             )
@@ -729,7 +764,7 @@ def main(args, cfg_env=None):
                             policy.reward_critic, 
                             {"obs": obs_b, "risk": risk_b}, 
                             target_value_r_b,
-                            rho=args.sam_rho, 
+                            rho=sam_rho, 
                             num_samples=args.sam_num_samples
                         )
                     else:
@@ -737,7 +772,7 @@ def main(args, cfg_env=None):
                             policy.reward_critic, 
                             {"obs": obs_b, "risk": risk_b}, 
                             target_value_r_b,
-                            rho=args.sam_rho)
+                            rho=sam_rho)
                     for name, param in policy.reward_critic.named_parameters():
                         if name in sam_grads_r:
                             param.grad = sam_grads_r[name]
@@ -755,14 +790,14 @@ def main(args, cfg_env=None):
                             policy.cost_critic, 
                             {"obs": obs_b, "risk": risk_b}, 
                             target_value_c_b,
-                            rho=args.sam_rho
+                            rho=sam_rho
                         )
                     else:
                         sam_grads_c, _ = compute_sam_gradients_critic(
                             policy.cost_critic, 
                             {"obs": obs_b, "risk": risk_b}, 
                             target_value_c_b,
-                            rho=args.sam_rho)
+                            rho=sam_rho)
                     for name, param in policy.cost_critic.named_parameters():
                         if name in sam_grads_c:
                             param.grad = sam_grads_c[name]
@@ -852,6 +887,17 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/AcceptanceStep")
             logger.log_tabular("Metrics/ViolationRate")
             logger.log_tabular("Metrics/TotalViolation")
+            
+            # Add uncertainty metrics
+            logger.log_tabular("Uncertainty/MeanEpistemic")
+            logger.log_tabular("Uncertainty/StdEpistemic")
+            logger.log_tabular("Uncertainty/MinEpistemic")
+            logger.log_tabular("Uncertainty/MaxEpistemic")
+            logger.log_tabular("Uncertainty/MedianEpistemic")
+            
+            # Add SAM rho logging
+            # logger.log_tabular("SAM/CurrentRho")
+            
             if epoch % 20 == 0:
                 # Add critic evaluation metrics
                 logger.log_tabular("Reward Value/EstimationError")

@@ -201,6 +201,10 @@ def single_agent_args():
         {"name": "--perturbation-target-kl", "type": float, "default": 0.01, "help": "Target KL for SAM"},
         {"name": "--record-gif", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to record GIF"},
         {"name": "--sam-num-samples", "type": int, "default": 10, "help": "Number of samples for SAM"},
+        {"name": "--sam-max-rho", "type": float, "default": 0.1, "help": "Maximum rho for SAM"},
+        {"name": "--sam-min-rho", "type": float, "default": 0.001, "help": "Minimum rho for SAM"},
+        {"name": "--sam-decay-rate", "type": float, "default": 0.99999, "help": "Decay rate for SAM"},
+        {"name": "--use-sam-decay", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use SAM decay"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

@@ -5,6 +5,195 @@ from safepo.common.model import ActorVCritic
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
+import torch.nn as nn
+import torch.nn.functional as F
+
+class RNDPredictor(nn.Module):
+    """
+    Random Network Distillation predictor network for measuring epistemic uncertainty.
+    """
+    def __init__(self, obs_dim: int, hidden_sizes: List[int] = [64, 64]):
+        super().__init__()
+        layers = []
+        input_dim = obs_dim
+        
+        for hidden_size in hidden_sizes:
+            layers.extend([
+                nn.Linear(input_dim, hidden_size),
+                nn.ReLU()
+            ])
+            input_dim = hidden_size
+        
+        # Output layer
+        layers.append(nn.Linear(input_dim, hidden_sizes[-1]))
+        
+        self.network = nn.Sequential(*layers)
+        
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.network(obs)
+
+class RNDTarget(nn.Module):
+    """
+    Random Network Distillation target network (fixed random weights).
+    """
+    def __init__(self, obs_dim: int, hidden_sizes: List[int] = [64, 64]):
+        super().__init__()
+        layers = []
+        input_dim = obs_dim
+        
+        for hidden_size in hidden_sizes:
+            layers.extend([
+                nn.Linear(input_dim, hidden_size),
+                nn.ReLU()
+            ])
+            input_dim = hidden_size
+        
+        # Output layer
+        layers.append(nn.Linear(input_dim, hidden_sizes[-1]))
+        
+        self.network = nn.Sequential(*layers)
+        
+        # Initialize with random weights and freeze
+        self._init_random_weights()
+        self._freeze_weights()
+    
+    def _init_random_weights(self):
+        """Initialize weights randomly and freeze them."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+                nn.init.constant_(module.bias, 0)
+    
+    def _freeze_weights(self):
+        """Freeze all parameters."""
+        for param in self.parameters():
+            param.requires_grad = False
+    
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.network(obs)
+
+class EpistemicUncertaintyMeasurer:
+    """
+    Measures epistemic uncertainty using Random Network Distillation approach.
+    """
+    def __init__(self, obs_dim: int, device: torch.device, hidden_sizes: List[int] = [64, 64]):
+        self.device = device
+        self.target_network = RNDTarget(obs_dim, hidden_sizes).to(device)
+        self.predictor_network = RNDPredictor(obs_dim, hidden_sizes).to(device)
+        self.optimizer = torch.optim.Adam(self.predictor_network.parameters(), lr=1e-3)
+        
+    def compute_uncertainty(self, obs: torch.Tensor) -> torch.Tensor:
+        """
+        Compute epistemic uncertainty for given observations.
+        
+        Args:
+            obs: Tensor of observations [batch_size, obs_dim]
+            
+        Returns:
+            uncertainty: Tensor of uncertainty values [batch_size]
+        """
+        with torch.no_grad():
+            target_output = self.target_network(obs)
+            predictor_output = self.predictor_network(obs)
+            
+            # Compute prediction error as uncertainty measure
+            uncertainty = F.mse_loss(predictor_output, target_output, reduction='none').mean(dim=1)
+            
+        return uncertainty
+    
+    def update_predictor(self, obs: torch.Tensor, num_steps: int = 10):
+        """
+        Update the predictor network to better predict the target network.
+        
+        Args:
+            obs: Tensor of observations [batch_size, obs_dim]
+            num_steps: Number of update steps
+        """
+        for _ in range(num_steps):
+            self.optimizer.zero_grad()
+            
+            target_output = self.target_network(obs)
+            predictor_output = self.predictor_network(obs)
+            
+            loss = F.mse_loss(predictor_output, target_output)
+            loss.backward()
+            
+            self.optimizer.step()
+    
+    def get_uncertainty_stats(self, obs: torch.Tensor) -> Dict[str, float]:
+        """
+        Compute uncertainty statistics for given observations.
+        
+        Args:
+            obs: Tensor of observations [batch_size, obs_dim]
+            
+        Returns:
+            stats: Dictionary containing uncertainty statistics
+        """
+        uncertainty = self.compute_uncertainty(obs)
+        
+        return {
+            'mean_uncertainty': uncertainty.mean().item(),
+            'std_uncertainty': uncertainty.std().item(),
+            'min_uncertainty': uncertainty.min().item(),
+            'max_uncertainty': uncertainty.max().item(),
+            'median_uncertainty': uncertainty.median().item(),
+        }
+
+def measure_epistemic_uncertainty_from_buffer(
+    buffer_data: Dict[str, torch.Tensor],
+    uncertainty_measurer: EpistemicUncertaintyMeasurer,
+    update_predictor: bool = True
+) -> Dict[str, float]:
+    """
+    Measure epistemic uncertainty for all state-action pairs in the buffer.
+    
+    Args:
+        buffer_data: Dictionary containing buffer data with 'obs' key
+        uncertainty_measurer: The uncertainty measurement object
+        update_predictor: Whether to update the predictor network
+        
+    Returns:
+        Dictionary containing uncertainty statistics
+    """
+    obs = buffer_data['obs']
+    
+    # Update predictor if requested
+    if update_predictor:
+        uncertainty_measurer.update_predictor(obs)
+    
+    # Compute uncertainty statistics
+    stats = uncertainty_measurer.get_uncertainty_stats(obs)
+    
+    return stats
+
+def measure_epistemic_uncertainty_from_rollouts(
+    episode_data: Dict[str, List[torch.Tensor]],
+    uncertainty_measurer: EpistemicUncertaintyMeasurer,
+    update_predictor: bool = True
+) -> Dict[str, float]:
+    """
+    Measure epistemic uncertainty for all observations from rollouts.
+    
+    Args:
+        episode_data: Dictionary containing lists of tensors from rollout_policy
+        uncertainty_measurer: The uncertainty measurement object
+        update_predictor: Whether to update the predictor network
+        
+    Returns:
+        Dictionary containing uncertainty statistics
+    """
+    # Concatenate all observations from all episodes
+    all_obs = torch.cat(episode_data['obs'])
+    
+    # Update predictor if requested
+    if update_predictor:
+        uncertainty_measurer.update_predictor(all_obs)
+    
+    # Compute uncertainty statistics
+    stats = uncertainty_measurer.get_uncertainty_stats(all_obs)
+    
+    return stats
 
 def rollout_policy(
     args,
@@ -487,3 +676,85 @@ def evaluate_critic_performance(
         'reward_critic': reward_metrics,
         'cost_critic': cost_metrics
     } 
+
+def compute_sam_rho_decay(
+    epoch: int,
+    max_epochs: int,
+    rho_max: float,
+    rho_min: float,
+    decay_type: str = 'exponential',
+    temperature: float = 1.0
+) -> float:
+    """
+    Compute SAM rho value with decay over epochs.
+    
+    Args:
+        epoch: Current epoch (0-indexed)
+        max_epochs: Total number of epochs
+        rho_max: Maximum rho value (at epoch 0)
+        rho_min: Minimum rho value (at final epoch)
+        decay_type: Type of decay ('exponential', 'linear', 'cosine')
+        temperature: Controls decay rate (higher = slower decay)
+        
+    Returns:
+        rho: Current rho value
+    """
+    if epoch >= max_epochs:
+        return rho_min
+    
+    # Normalize epoch to [0, 1]
+    progress = epoch / max_epochs
+    
+    if decay_type == 'exponential':
+        # Exponential decay: rho = rho_min + (rho_max - rho_min) * exp(-progress / temperature)
+        decay_factor = np.exp(-progress / temperature)
+        rho = rho_min + (rho_max - rho_min) * decay_factor
+        
+    elif decay_type == 'linear':
+        # Linear decay: rho = rho_max - (rho_max - rho_min) * progress
+        rho = rho_max - (rho_max - rho_min) * progress
+        
+    elif decay_type == 'cosine':
+        # Cosine decay: rho = rho_min + (rho_max - rho_min) * 0.5 * (1 + cos(pi * progress))
+        decay_factor = 0.5 * (1 + np.cos(np.pi * progress))
+        rho = rho_min + (rho_max - rho_min) * decay_factor
+        
+    else:
+        raise ValueError(f"Unknown decay type: {decay_type}")
+    
+    return rho
+
+def get_sam_rho_with_decay(
+    args,
+    epoch: int,
+    max_epochs: int
+) -> float:
+    """
+    Get SAM rho value with decay based on training arguments.
+    
+    Args:
+        args: Training arguments containing SAM configuration
+        epoch: Current epoch
+        max_epochs: Total number of epochs
+        
+    Returns:
+        rho: Current rho value
+    """
+    if hasattr(args, 'use_sam_decay') and args.use_sam_decay:
+        # Use decay if enabled
+        rho_max = getattr(args, 'sam_max_rho', args.sam_rho)
+        rho_min = getattr(args, 'sam_min_rho', args.sam_rho / 10.0)
+        decay_type = getattr(args, 'sam_decay_type', 'exponential')
+        temperature = getattr(args, 'sam_decay_temperature', 1.0)
+        
+        return compute_sam_rho_decay(
+            epoch=epoch,
+            max_epochs=max_epochs,
+            rho_max=rho_max,
+            rho_min=rho_min,
+            decay_type=decay_type,
+            temperature=temperature
+        )
+    else:
+        # Use constant rho
+        return args.sam_rho 

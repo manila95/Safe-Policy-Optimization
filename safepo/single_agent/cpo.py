@@ -220,6 +220,24 @@ def main(args, cfg_env=None):
         num_envs=args.num_envs,
         gamma=config["gamma"],
     )
+    
+    # Initialize epistemic uncertainty measurer
+    uncertainty_measurer = EpistemicUncertaintyMeasurer(
+        obs_dim=obs_space.shape[0],
+        device=device,
+        hidden_sizes=[64, 64]
+    )
+    
+    # setup lagrange multiplier
+    lagrange = Lagrange(
+        cost_limit=args.cost_limit,
+        lagrangian_multiplier_init=args.lagrangian_multiplier_init,
+        pid_kd=args.pid_kd,
+        pid_ki=args.pid_ki,
+        pid_kp=args.pid_kp,
+        penalty_max=args.lagrangian_multiplier_init*100,
+    )
+
 
     ## Risk Model 
     if args.use_risk:
@@ -349,6 +367,25 @@ def main(args, cfg_env=None):
                         last_value_r=last_value_r, last_value_c=last_value_c, idx=idx
                     )
         rollout_end_time = time.time()
+
+        # Measure epistemic uncertainty from buffer data
+        data = buffer.get()
+        uncertainty_stats = measure_epistemic_uncertainty_from_buffer(
+            buffer_data=data,
+            uncertainty_measurer=uncertainty_measurer,
+            update_predictor=True
+        )
+        
+        # Log uncertainty statistics
+        logger.store(
+            **{
+                "Uncertainty/MeanEpistemic": uncertainty_stats['mean_uncertainty'],
+                "Uncertainty/StdEpistemic": uncertainty_stats['std_uncertainty'],
+                "Uncertainty/MinEpistemic": uncertainty_stats['min_uncertainty'],
+                "Uncertainty/MaxEpistemic": uncertainty_stats['max_uncertainty'],
+                "Uncertainty/MedianEpistemic": uncertainty_stats['median_uncertainty'],
+            }
+        )
 
         eval_start_time = time.time()
 
@@ -762,6 +799,14 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/gradient_norm")
             logger.log_tabular("Misc/H_inv_g")
             logger.log_tabular("Misc/AcceptanceStep")
+            
+            # Add uncertainty metrics
+            logger.log_tabular("Uncertainty/MeanEpistemic")
+            logger.log_tabular("Uncertainty/StdEpistemic")
+            logger.log_tabular("Uncertainty/MinEpistemic")
+            logger.log_tabular("Uncertainty/MaxEpistemic")
+            logger.log_tabular("Uncertainty/MedianEpistemic")
+            
             if args.use_risk and args.fine_tune_risk:
                 #try:
                 logger.log_tabular("risk/risk_loss")

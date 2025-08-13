@@ -175,6 +175,9 @@ def single_agent_args():
         {"name": "--pid-kp", "type": float, "default": 0.1, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-ki", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-kd", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
+        {"name": "--use-ensemble-critic-cost", "type": bool, "default": False, "help": "Whether to use ensemble critic cost"},
+        {"name": "--num-critic", "type": int, "default": 5, "help": "Number of critics for ensemble critic cost"},
+        {"name": "--beta-c", "type": float, "default": 0, "help": "beta for ensemble critic cost"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

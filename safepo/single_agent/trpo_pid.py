@@ -40,7 +40,7 @@ from safepo.common.buffer import VectorizedOnPolicyBuffer
 from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
 from safepo.common.lagrange import PIDLagrangian as Lagrange
 from safepo.common.logger import EpochLogger
-from safepo.common.model import ActorVCritic
+from safepo.common.model import ActorVCritic, ActorVEnsembleCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
 # from src.models.risk_models import *
 # from src.datasets.risk_datasets import *
@@ -205,19 +205,35 @@ def main(args, cfg_env=None):
     local_steps_per_epoch = steps_per_epoch // args.num_envs
     epochs = total_steps // steps_per_epoch
     # create the actor-critic module
-    policy = ActorVCritic(
-        obs_dim=obs_space.shape[0],
-        act_dim=act_space.shape[0],
-        hidden_sizes=config["hidden_sizes"],
-        use_risk=args.use_risk,
-        risk_size=risk_size,
-    ).to(device)
+    if args.use_ensemble_critic_cost:
+        policy = ActorVEnsembleCritic(
+            obs_dim=obs_space.shape[0],
+            act_dim=act_space.shape[0],
+            hidden_sizes=config["hidden_sizes"],
+            use_risk=args.use_risk,
+            risk_size=risk_size,
+            num_critic=args.num_critic,
+        ).to(device)
+    else:
+        policy = ActorVCritic(
+            obs_dim=obs_space.shape[0],
+            act_dim=act_space.shape[0],
+            hidden_sizes=config["hidden_sizes"],
+            use_risk=args.use_risk,
+            risk_size=risk_size,
+        ).to(device)
     reward_critic_optimizer = torch.optim.Adam(
         policy.reward_critic.parameters(), lr=1e-3
     )
-    cost_critic_optimizer = torch.optim.Adam(
-        policy.cost_critic.parameters(), lr=1e-3
-    )
+    if args.use_ensemble_critic_cost:
+        cost_critic_optimizer = []
+        for critic in policy.cost_critics:
+            cost_critic_optimizer.append(torch.optim.Adam(critic.parameters(), lr=1e-3))
+        
+    else:
+        cost_critic_optimizer = torch.optim.Adam(
+            policy.cost_critic.parameters(), lr=1e-3
+        )
 
     if args.use_risk:
         risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
@@ -250,6 +266,8 @@ def main(args, cfg_env=None):
         device=device,
         num_envs=args.num_envs,
         gamma=config["gamma"],
+        num_critic=args.num_critic,
+        use_ensemble_critic_cost=args.use_ensemble_critic_cost,
     )
     # setup lagrangian multiplier
     lagrange = Lagrange(
@@ -355,7 +373,7 @@ def main(args, cfg_env=None):
                 reward=reward,
                 cost=cost,
                 value_r=value_r,
-                value_c=value_c,
+                value_c=value_c.transpose(0, 1),
                 log_prob=log_prob,
             )
 
@@ -394,6 +412,8 @@ def main(args, cfg_env=None):
                                 "Metrics/EpRet": np.mean(rew_deque),
                                 "Metrics/EpCost": np.mean(cost_deque),
                                 "Metrics/EpLen": np.mean(len_deque),
+                                "Metrics/EpCostStd": np.std(cost_deque),
+                                "Metrics/EpRetStd": np.std(rew_deque),
                                 #"Metrics/EpGoal": np.mean(goal_deque),
                                 "Metrics/TotalCost": total_cost,
                                 "Metrics/ViolationRate": np.mean(np.array(cost_deque) > args.cost_limit),
@@ -464,8 +484,23 @@ def main(args, cfg_env=None):
         policy.actor.zero_grad()
 
         # comnpute advantage
-        advantage = data["adv_r"] - lagrange.lagrangian_multiplier * data["adv_c"]
+        if args.use_ensemble_critic_cost:
+            adv_c_mean = data["adv_c"].mean(dim=-1) 
+            adv_c_std = data["adv_c"].std(dim=-1)
+            adv_c_ = adv_c_mean + args.beta_c * adv_c_std
+
+            advantage = data["adv_r"] - lagrange.lagrangian_multiplier * adv_c_
+        else:
+            advantage = data["adv_r"] - lagrange.lagrangian_multiplier * data["adv_c"]
         advantage /= (lagrange.lagrangian_multiplier + 1)
+
+        logger.store(
+            **{
+                "Misc/Adv_c_mean": adv_c_mean.mean().item(),
+                "Misc/Adv_c_std": adv_c_std.mean().item(),
+                "Misc/Adv_c_": adv_c_.mean().item(),
+            }
+        )
 
         # compute loss_pi
         temp_distribution = policy.actor(data["obs"], data["risk"])
@@ -572,20 +607,39 @@ def main(args, cfg_env=None):
                 risk_b = risk_b if args.use_risk else None
                 reward_critic_optimizer.zero_grad()
                 loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
-                cost_critic_optimizer.zero_grad()
-                loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk_b), target_value_c_b)
-                if config.get("use_critic_norm", True):
-                    for param in policy.reward_critic.parameters():
-                        loss_r += param.pow(2).sum() * 0.001
-                    for param in policy.cost_critic.parameters():
-                        loss_c += param.pow(2).sum() * 0.001
-                total_loss = 2*loss_r + loss_c \
-                    if config.get("use_value_coefficient", False) \
-                    else loss_r + loss_c
-                total_loss.backward()
-                clip_grad_norm_(policy.parameters(), config["max_grad_norm"])
-                reward_critic_optimizer.step()
-                cost_critic_optimizer.step()
+                if args.use_ensemble_critic_cost:
+                    loss_c = 0
+                    for i in range(args.num_critic):
+                        cost_critic_optimizer[i].zero_grad()
+                        loss_c += nn.functional.mse_loss(policy.cost_critics[i](obs_b, risk_b), target_value_c_b[:,i])
+                        if config.get("use_critic_norm", True):
+                            for param in policy.cost_critics[i].parameters():
+                                loss_c += param.pow(2).sum() * 0.001
+                    loss_c /= args.num_critic
+                    total_loss = 2*loss_r + loss_c \
+                        if config.get("use_value_coefficient", False) \
+                        else loss_r + loss_c  
+                    total_loss.backward()
+                    clip_grad_norm_(policy.parameters(), config["max_grad_norm"])
+                    for i in range(args.num_critic):
+                        cost_critic_optimizer[i].step()
+                    reward_critic_optimizer.step()
+                    
+                else:
+                    cost_critic_optimizer.zero_grad()
+                    loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk_b), target_value_c_b)
+                    if config.get("use_critic_norm", True):
+                        for param in policy.reward_critic.parameters():
+                            loss_r += param.pow(2).sum() * 0.001
+                        for param in policy.cost_critic.parameters():
+                            loss_c += param.pow(2).sum() * 0.001
+                    total_loss = 2*loss_r + loss_c \
+                        if config.get("use_value_coefficient", False) \
+                        else loss_r + loss_c
+                    total_loss.backward()
+                    clip_grad_norm_(policy.parameters(), config["max_grad_norm"])
+                    reward_critic_optimizer.step()
+                    cost_critic_optimizer.step()
 
                 logger.store(
                     **{
@@ -608,6 +662,8 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpCost")
             logger.log_tabular("Metrics/TotalCost")
             logger.log_tabular("Metrics/EpLen")
+            logger.log_tabular("Metrics/EpCostStd")
+            logger.log_tabular("Metrics/EpRetStd")
             #logger.log_tabular("Metrics/EpGoal")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")
@@ -635,6 +691,9 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/xHx")
             logger.log_tabular("Misc/gradient_norm")
             logger.log_tabular("Misc/H_inv_g")
+            logger.log_tabular("Misc/Adv_c_mean")
+            logger.log_tabular("Misc/Adv_c_std")
+            logger.log_tabular("Misc/Adv_c_")
             logger.log_tabular("Misc/AcceptanceStep")
             logger.log_tabular("Metrics/ViolationRate")
             logger.log_tabular("Metrics/TotalViolation")

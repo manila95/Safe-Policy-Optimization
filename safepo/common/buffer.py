@@ -48,8 +48,12 @@ class VectorizedOnPolicyBuffer:
         standardized_adv_r: bool = True,
         standardized_adv_c: bool = True,
         device: torch.device = "cpu",
+        num_critic: int = 5,
+        use_ensemble_critic_cost: bool = False,
         num_envs: int = 1,
     ) -> None:
+        self.num_critic = num_critic
+        self.use_ensemble_critic_cost = use_ensemble_critic_cost
         self.buffers: list[dict[str, torch.tensor]] = [
             {
                 "obs": torch.zeros(
@@ -62,11 +66,11 @@ class VectorizedOnPolicyBuffer:
                 "cost": torch.zeros(size, dtype=torch.float32, device=device),
                 "done": torch.zeros(size, dtype=torch.float32, device=device),
                 "value_r": torch.zeros(size, dtype=torch.float32, device=device),
-                "value_c": torch.zeros(size, dtype=torch.float32, device=device),
+                "value_c": torch.zeros((size, num_critic), dtype=torch.float32, device=device) if use_ensemble_critic_cost else torch.zeros(size, dtype=torch.float32, device=device),
                 "adv_r": torch.zeros(size, dtype=torch.float32, device=device),
-                "adv_c": torch.zeros(size, dtype=torch.float32, device=device),
+                "adv_c": torch.zeros((size, num_critic), dtype=torch.float32, device=device) if use_ensemble_critic_cost else torch.zeros(size, dtype=torch.float32, device=device),
                 "target_value_r": torch.zeros(size, dtype=torch.float32, device=device),
-                "target_value_c": torch.zeros(size, dtype=torch.float32, device=device),
+                "target_value_c": torch.zeros((size, num_critic), dtype=torch.float32, device=device) if use_ensemble_critic_cost else torch.zeros(size, dtype=torch.float32, device=device),
                 "log_prob": torch.zeros(size, dtype=torch.float32, device=device),
             }
             for _ in range(num_envs)
@@ -115,8 +119,9 @@ class VectorizedOnPolicyBuffer:
         path_slice = slice(self.path_start_idx_list[idx], self.ptr_list[idx])
         last_value_r = last_value_r.to(self._device)
         last_value_c = last_value_c.to(self._device)
+
         rewards = torch.cat([self.buffers[idx]["reward"][path_slice], last_value_r])
-        costs = torch.cat([self.buffers[idx]["cost"][path_slice], last_value_c])
+        costs = torch.cat([self.buffers[idx]["cost"][path_slice], last_value_c.mean(dim=-1)])
         values_r = torch.cat([self.buffers[idx]["value_r"][path_slice], last_value_r])
         values_c = torch.cat([self.buffers[idx]["value_c"][path_slice], last_value_c])
 
@@ -126,12 +131,29 @@ class VectorizedOnPolicyBuffer:
             lam=self._lam,
             gamma=self._gamma,
         )
-        adv_c, target_value_c = calculate_adv_and_value_targets(
-            values_c,
-            costs,
-            lam=self._lam_c,
-            gamma=self._gamma,
-        )
+        if self.use_ensemble_critic_cost:
+            adv_c = []
+            target_value_c = []
+            for i in range(self.num_critic):
+                adv_c_i, target_value_c_i = calculate_adv_and_value_targets(
+                    values_c[:, i],
+                    costs,
+                    lam=self._lam_c,
+                    gamma=self._gamma,
+                )
+                adv_c.append(adv_c_i)
+                target_value_c.append(target_value_c_i)
+            adv_c = torch.stack(adv_c, dim=-1)
+            target_value_c = torch.stack(target_value_c, dim=-1)
+        else:
+            adv_c, target_value_c = calculate_adv_and_value_targets(
+                values_c,
+                costs,
+                lam=self._lam_c,
+                gamma=self._gamma,
+            )
+        
+
         self.buffers[idx]["adv_r"][path_slice] = adv_r
         self.buffers[idx]["adv_c"][path_slice] = adv_c
         self.buffers[idx]["target_value_r"][path_slice] = target_value_r
@@ -153,7 +175,10 @@ class VectorizedOnPolicyBuffer:
         data = {k: torch.cat(v, dim=0) for k, v in data_pre.items()}
         adv_mean = data["adv_r"].mean()
         adv_std = data["adv_r"].std()
-        cadv_mean = data["adv_c"].mean()
+        if self.use_ensemble_critic_cost:
+            cadv_mean = data["adv_c"].mean(dim=0).unsqueeze(0)
+        else:
+            cadv_mean = data["adv_c"].mean()
         if self._standardized_adv_r:
             data["adv_r"] = (data["adv_r"] - adv_mean) / (adv_std + 1e-8)
         if self._standardized_adv_c:

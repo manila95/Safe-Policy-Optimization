@@ -142,8 +142,9 @@ class VCritic(nn.Module):
         value_estimate = critic(observation)
     """
 
-    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, seed=42):
         super().__init__()
+        torch.manual_seed(seed)
         self.use_risk = use_risk
         if self.use_risk:
             self.critic = build_risk_mlp_network([obs_dim]+hidden_sizes+[1], risk_size)
@@ -228,6 +229,89 @@ class ActorVCritic(nn.Module):
             value_r = self.reward_critic(obs)
             value_c = self.cost_critic(obs)
         return action, log_prob, value_r, value_c
+
+
+
+class ActorVEnsembleCritic(nn.Module):
+    """
+    Actor-critic policy for reinforcement learning.
+
+    This class represents an actor-critic policy that includes an actor network, two critic networks for reward
+    and cost estimation, and provides methods for taking policy steps and estimating values.
+
+    Args:
+        obs_dim (int): Dimensionality of the observation space.
+        act_dim (int): Dimensionality of the action space.
+
+    Example:
+        obs_dim = 10
+        act_dim = 2
+        actor_critic = ActorVCritic(obs_dim, act_dim)
+        observation = torch.randn(1, obs_dim)
+        action, log_prob, reward_value, cost_value = actor_critic.step(observation)
+        value_estimate = actor_critic.get_value(observation)
+    """
+
+    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, num_critic=5):
+        super().__init__()
+        self.use_risk = use_risk
+        self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+        self.cost_critics = []
+        for i in range(num_critic):
+            self.cost_critics.append(VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, seed=i))
+        self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+
+    def get_value(self, obs, risk=None):
+        """
+        Estimate the value of observations using the critic network.
+
+        Args:
+            obs (torch.Tensor): Input observation tensor.
+
+        Returns:
+            torch.Tensor: Estimated value for the input observation.
+        """
+        if self.use_risk:
+            return self.critic(obs, risk)
+        else:
+            return self.critic(obs)
+
+    def step(self, obs, risk=None, deterministic=False):
+        """
+        Take a policy step based on observations.
+
+        Args:
+            obs (torch.Tensor): Input observation tensor.
+            deterministic (bool): Flag indicating whether to take a deterministic action.
+
+        Returns:
+            tuple: Tuple containing action tensor, log probabilities of the action, reward value estimate,
+                   and cost value estimate.
+        """
+
+        if self.use_risk:
+            dist = self.actor(obs, risk)
+        else:
+            dist = self.actor(obs)
+        if deterministic:
+            action = dist.mean
+        else:
+            action = dist.rsample()
+        log_prob = dist.log_prob(action).sum(axis=-1)
+        if self.use_risk:
+            value_r = self.reward_critic(obs, risk)
+            value_c = []
+            for critic in self.cost_critics:
+                value_c.append(critic(obs, risk))
+            value_c = torch.stack(value_c, dim=0)
+        else:
+            value_r = self.reward_critic(obs)
+            value_c = []
+            for critic in self.cost_critics:
+                value_c.append(critic(obs))
+            value_c = torch.stack(value_c, dim=0)
+        return action, log_prob, value_r, value_c
+
 
 class MultiAgentActor(nn.Module):
     """

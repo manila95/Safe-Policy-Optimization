@@ -40,7 +40,7 @@ from safepo.common.buffer import VectorizedOnPolicyBuffer
 from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
 from safepo.common.lagrange import PIDLagrangian as Lagrange
 from safepo.common.logger import EpochLogger
-from safepo.common.model import ActorVCritic
+from safepo.common.model import ActorVCritic, EnsembleVCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
 from safepo.single_agent.utils import *
 from sam import *
@@ -175,6 +175,51 @@ def env_fn(env_id):
         return make_sa_gymrobot_env
 
 
+def train_ensemble_critics(ensemble_reward_critic, ensemble_cost_critic,
+                           ensemble_reward_critic_optimizer, ensemble_cost_critic_optimizer, 
+                           dataloader, learning_iters, num_critics=5, config=None, device="cpu"):
+    """
+    Vectorized training of ensemble critics using different masks and targets for each member.
+    Each member receives a different mask and a different target for each batch.
+    Args:
+        ensemble_reward_critic: nn.ModuleList or list of reward critic networks
+        ensemble_cost_critic: nn.ModuleList or list of cost critic networks
+        ensemble_reward_critic_optimizer: list of optimizers for reward critics
+        ensemble_cost_critic_optimizer: list of optimizers for cost critics
+        dataloader: torch.utils.data.DataLoader yielding (obs, risk, target_value_r, target_value_c)
+        learning_iters: number of passes over the dataloader
+    """
+
+    for _ in range(learning_iters):
+        for obs_b, risk_b, target_value_r_b, target_value_c_b in dataloader:
+            batch_size = obs_b.shape[0]
+            obs_b = obs_b.to(device)
+            risk_b = risk_b.to(device) if risk_b is not None else None
+            target_value_r_b = target_value_r_b.to(device)
+            target_value_c_b = target_value_c_b.to(device)
+
+            # Generate random masks for each member: [num_members, batch_size]
+            masks = (torch.rand(num_critics, batch_size, device=device) > 0.5).to(device)
+            
+            # Repeat observations and targets for each member
+            obs_b_rep = obs_b.unsqueeze(0).repeat(num_critics, 1, 1)  # [num_critics, batch_size, obs_dim]
+            risk_b_rep = risk_b.unsqueeze(0).repeat(num_critics, 1, 1) if risk_b is not None else None  # [num_critics, batch_size, risk_dim]
+
+            ensemble_reward_critic_optimizer.zero_grad()
+            loss_r = nn.functional.mse_loss(ensemble_reward_critic(obs_b_rep, risk_b_rep), target_value_r_b)
+            ensemble_cost_critic_optimizer.zero_grad()
+            loss_c = nn.functional.mse_loss(ensemble_cost_critic(obs_b_rep, risk_b_rep), target_value_c_b)
+
+            total_loss = loss_r + loss_c
+            # Apply masks and take the mean to keep it as a scalar
+            masked_loss = (total_loss * masks).mean()
+            masked_loss.backward()
+            clip_grad_norm_(ensemble_reward_critic.parameters(), config["max_grad_norm"])
+            clip_grad_norm_(ensemble_cost_critic.parameters(), config["max_grad_norm"])
+            ensemble_reward_critic_optimizer.step()
+            ensemble_cost_critic_optimizer.step()
+            
+
 
 
 def main(args, cfg_env=None):
@@ -225,11 +270,37 @@ def main(args, cfg_env=None):
         use_actor_layer_norm=args.use_actor_layer_norm,
         use_critic_layer_norm=args.use_critic_layer_norm,
     ).to(device)
+
+
+    if args.use_ensemble_critic:
+        ensemble_reward_critic = EnsembleVCritic(
+            obs_dim=obs_space.shape[0],
+            hidden_sizes=config["hidden_sizes"],
+            use_risk=args.use_risk,
+            risk_size=risk_size,
+            use_layer_norm=args.use_critic_layer_norm,
+            num_critics=args.num_critics,
+        )
+        ensemble_cost_critic = EnsembleVCritic(
+            obs_dim=obs_space.shape[0],
+            hidden_sizes=config["hidden_sizes"],
+            use_risk=args.use_risk,
+            risk_size=risk_size,
+            use_layer_norm=args.use_critic_layer_norm,
+            num_critics=args.num_critics,
+        )
     reward_critic_optimizer = torch.optim.Adam(
         policy.reward_critic.parameters(), lr=1e-3
     )
     cost_critic_optimizer = torch.optim.Adam(
         policy.cost_critic.parameters(), lr=1e-3
+    )
+
+    ensemble_reward_critic_optimizer = torch.optim.Adam(
+        ensemble_reward_critic.parameters(), lr=1e-3
+    )
+    ensemble_cost_critic_optimizer = torch.optim.Adam(
+        ensemble_cost_critic.parameters(), lr=1e-3
     )
 
     if args.use_risk:
@@ -330,6 +401,10 @@ def main(args, cfg_env=None):
                     cost = terminated
                     success = 0
 
+            if args.use_ensemble_critic:
+                ensemble_value_r = ensemble_reward_critic(obs, risk)
+                ensemble_value_c = ensemble_cost_critic(obs, risk)
+ 
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_success += success.cpu().numpy() if args.task in isaac_gym_map.keys() else success
@@ -385,6 +460,8 @@ def main(args, cfg_env=None):
                 value_r=value_r,
                 value_c=value_c,
                 log_prob=log_prob,
+                ensemble_value_r=ensemble_value_r.transpose(0, 1),
+                ensemble_value_c=ensemble_value_c.transpose(0, 1),
             )
 
             obs = next_obs
@@ -401,14 +478,20 @@ def main(args, cfg_env=None):
                                 _, _, last_value_r, last_value_c = policy.step(
                                     obs[idx], risk_idx, deterministic=False
                                 )
+                                ensemble_last_value_r = ensemble_reward_critic(obs[idx], risk_idx)
+                                ensemble_last_value_c = ensemble_cost_critic(obs[idx], risk_idx)
                         if time_out:
                             with torch.no_grad():
                                 final_risk_idx = final_risk[idx] if args.use_risk else None 
                                 _, _, last_value_r, last_value_c = policy.step(
                                     info["final_observation"][idx], final_risk_idx, deterministic=False
                                 )
+                                ensemble_last_value_r = ensemble_reward_critic(info["final_observation"][idx], final_risk_idx)
+                                ensemble_last_value_c = ensemble_cost_critic(info["final_observation"][idx], final_risk_idx)
                         last_value_r = last_value_r.unsqueeze(0)
                         last_value_c = last_value_c.unsqueeze(0)
+                        ensemble_last_value_r = ensemble_last_value_r.unsqueeze(0)
+                        ensemble_last_value_c = ensemble_last_value_c.unsqueeze(0)
                     if done or time_out:
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
@@ -438,9 +521,10 @@ def main(args, cfg_env=None):
                         ep_len[idx] = 0.0
                         ep_success[idx] = 0.0
                         logger.logged = False
-
                     buffer.finish_path(
-                        last_value_r=last_value_r, last_value_c=last_value_c, idx=idx
+                        last_value_r=last_value_r, last_value_c=last_value_c,
+                        ensemble_last_value_r=ensemble_last_value_r, ensemble_last_value_c=ensemble_last_value_c,
+                        idx=idx
                     )
         rollout_end_time = time.time()
         if epoch % 20 == 0:
@@ -564,6 +648,18 @@ def main(args, cfg_env=None):
 
         # update policy
         data = buffer.get()
+        print(data["ensemble_value_c"].shape)
+        if args.use_ensemble_critic:
+            ensemble_c_mean, ensemble_c_std = torch.mean(data["ensemble_value_c"], dim=1).mean().item(), torch.std(data["ensemble_value_c"], dim=1).mean().item()
+            ensemble_r_mean, ensemble_r_std = torch.mean(data["ensemble_value_r"], dim=1).mean().item(), torch.std(data["ensemble_value_r"], dim=1).mean().item()
+            logger.store(
+                **{
+                    "Misc/EnsembleCMean": ensemble_c_mean,
+                    "Misc/EnsembleCStd": ensemble_c_std,
+                    "Misc/EnsembleRMean": ensemble_r_mean,
+                    "Misc/EnsembleRStd": ensemble_r_std,
+                }
+            )
         with torch.no_grad():
             data["risk"] = risk_model(data["obs"]) if args.use_risk else None
         fvp_obs = data["obs"][:: 1]
@@ -708,6 +804,17 @@ def main(args, cfg_env=None):
             batch_size=config.get("batch_size", args.steps_per_epoch//config.get("num_mini_batch", 1)),
             shuffle=True,
         )
+        if args.use_ensemble_critic:
+            train_ensemble_critics(
+                ensemble_reward_critic,
+                ensemble_cost_critic,
+                ensemble_reward_critic_optimizer,
+                ensemble_cost_critic_optimizer,
+                dataloader,
+                config["learning_iters"],
+                config=config,
+                device=device
+            )
         for _ in range(config["learning_iters"]):
             for (
                 obs_b,
@@ -803,6 +910,12 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpSuccessStd")
             logger.log_tabular("Metrics/EpRetStd")
             logger.log_tabular("Metrics/EpCostStd")
+
+            if args.use_ensemble_critic:
+                logger.log_tabular("Misc/EnsembleCMean")
+                logger.log_tabular("Misc/EnsembleCStd")
+                logger.log_tabular("Misc/EnsembleRMean")
+                logger.log_tabular("Misc/EnsembleRStd")
             #logger.log_tabular("Metrics/EpGoal")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")

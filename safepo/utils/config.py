@@ -200,6 +200,8 @@ def single_agent_args():
         {"name": "--use-kl", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use KL for SAM"},
         {"name": "--perturbation-target-kl", "type": float, "default": 0.01, "help": "Target KL for SAM"},
         {"name": "--record-gif", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to record GIF"},
+        {"name": "--use-ensemble-critic", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use ensemble critic"},
+        {"name": "--num-critics", "type": int, "default": 5, "help": "Number of critics in the ensemble"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

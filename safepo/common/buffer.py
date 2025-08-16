@@ -36,6 +36,8 @@ class VectorizedOnPolicyBuffer:
         standardized_adv_c (bool, optional): Whether to standardize advantage costs. Defaults to True.
         device (torch.device, optional): The device to store tensors on. Defaults to "cpu".
         num_envs (int, optional): The number of parallel environments. Defaults to 1.
+        num_critics (int, optional): The number of ensemble critics. Defaults to 5.
+        optimize_memory (bool, optional): Whether to use memory optimization. Defaults to False.
     """
     def __init__(
         self,
@@ -49,28 +51,54 @@ class VectorizedOnPolicyBuffer:
         standardized_adv_c: bool = True,
         device: torch.device = "cpu",
         num_envs: int = 1,
+        num_critics: int = 5,
+        optimize_memory: bool = False,
     ) -> None:
+        self.num_critics = num_critics
+        self.optimize_memory = optimize_memory
+        
+        # Use smaller data types for memory optimization
+        if optimize_memory:
+            dtype = torch.float16
+            done_dtype = torch.bool
+        else:
+            dtype = torch.float32
+            done_dtype = torch.float32
+            
         self.buffers: list[dict[str, torch.tensor]] = [
             {
                 "obs": torch.zeros(
-                    (size, *obs_space.shape), dtype=torch.float32, device=device
+                    (size, *obs_space.shape), dtype=dtype, device=device
                 ),
                 "act": torch.zeros(
-                    (size, *act_space.shape), dtype=torch.float32, device=device
+                    (size, *act_space.shape), dtype=dtype, device=device
                 ),
-                "reward": torch.zeros(size, dtype=torch.float32, device=device),
-                "cost": torch.zeros(size, dtype=torch.float32, device=device),
-                "done": torch.zeros(size, dtype=torch.float32, device=device),
-                "value_r": torch.zeros(size, dtype=torch.float32, device=device),
-                "value_c": torch.zeros(size, dtype=torch.float32, device=device),
-                "adv_r": torch.zeros(size, dtype=torch.float32, device=device),
-                "adv_c": torch.zeros(size, dtype=torch.float32, device=device),
-                "target_value_r": torch.zeros(size, dtype=torch.float32, device=device),
-                "target_value_c": torch.zeros(size, dtype=torch.float32, device=device),
-                "log_prob": torch.zeros(size, dtype=torch.float32, device=device),
+                "reward": torch.zeros(size, dtype=dtype, device=device),
+                "cost": torch.zeros(size, dtype=dtype, device=device),
+                "done": torch.zeros(size, dtype=done_dtype, device=device),
+                "value_r": torch.zeros(size, dtype=dtype, device=device),
+                "value_c": torch.zeros(size, dtype=dtype, device=device),
+                "adv_r": torch.zeros(size, dtype=dtype, device=device),
+                "adv_c": torch.zeros(size, dtype=dtype, device=device),
+                "target_value_r": torch.zeros(size, dtype=dtype, device=device),
+                "target_value_c": torch.zeros(size, dtype=dtype, device=device),
+                "log_prob": torch.zeros(size, dtype=dtype, device=device),
             }
             for _ in range(num_envs)
         ]
+        
+        # Only allocate ensemble buffers if needed and not optimizing memory
+        if num_critics > 1 and not optimize_memory:
+            for buffer in self.buffers:
+                buffer.update({
+                    "ensemble_value_r": torch.zeros((size, num_critics), dtype=dtype, device=device),
+                    "ensemble_value_c": torch.zeros((size, num_critics), dtype=dtype, device=device),
+                    "adv_r_ensemble": torch.zeros((size, num_critics), dtype=dtype, device=device),
+                    "adv_c_ensemble": torch.zeros((size, num_critics), dtype=dtype, device=device),
+                    "ensemble_target_value_r": torch.zeros((size, num_critics), dtype=dtype, device=device),
+                    "ensemble_target_value_c": torch.zeros((size, num_critics), dtype=dtype, device=device),
+                })
+        
         self._gamma = gamma
         self._lam = lam
         self._lam_c = lam_c
@@ -98,6 +126,8 @@ class VectorizedOnPolicyBuffer:
         self,
         last_value_r: torch.Tensor | None = None,
         last_value_c: torch.Tensor | None = None,
+        ensemble_last_value_r: torch.Tensor | None = None,
+        ensemble_last_value_c: torch.Tensor | None = None,
         idx: int = 0,
     ) -> None:
         """
@@ -112,6 +142,10 @@ class VectorizedOnPolicyBuffer:
             last_value_r = torch.zeros(1, device=self._device)
         if last_value_c is None:
             last_value_c = torch.zeros(1, device=self._device)
+        if ensemble_last_value_r is None:
+            ensemble_last_value_r = torch.zeros(self.num_critics, device=self._device)
+        if ensemble_last_value_c is None:
+            ensemble_last_value_c = torch.zeros(self.num_critics, device=self._device)
         path_slice = slice(self.path_start_idx_list[idx], self.ptr_list[idx])
         last_value_r = last_value_r.to(self._device)
         last_value_c = last_value_c.to(self._device)
@@ -119,6 +153,8 @@ class VectorizedOnPolicyBuffer:
         costs = torch.cat([self.buffers[idx]["cost"][path_slice], last_value_c])
         values_r = torch.cat([self.buffers[idx]["value_r"][path_slice], last_value_r])
         values_c = torch.cat([self.buffers[idx]["value_c"][path_slice], last_value_c])
+        ensemble_values_r = torch.cat([self.buffers[idx]["ensemble_value_r"][path_slice], ensemble_last_value_r])
+        ensemble_values_c = torch.cat([self.buffers[idx]["ensemble_value_c"][path_slice], ensemble_last_value_c])
 
         adv_r, target_value_r = calculate_adv_and_value_targets(
             values_r,
@@ -132,11 +168,26 @@ class VectorizedOnPolicyBuffer:
             lam=self._lam_c,
             gamma=self._gamma,
         )
+        adv_r_ensemble, target_value_r_ensemble = calculate_adv_and_value_targets_ensemble(
+            ensemble_values_r,
+            rewards,
+            lam=self._lam,
+            gamma=self._gamma,
+        )
+        adv_c_ensemble, target_value_c_ensemble = calculate_adv_and_value_targets_ensemble(
+            ensemble_values_c,
+            costs,
+            lam=self._lam_c,
+            gamma=self._gamma,
+        )
         self.buffers[idx]["adv_r"][path_slice] = adv_r
         self.buffers[idx]["adv_c"][path_slice] = adv_c
+        self.buffers[idx]["adv_r_ensemble"][path_slice] = adv_r_ensemble
+        self.buffers[idx]["adv_c_ensemble"][path_slice] = adv_c_ensemble
         self.buffers[idx]["target_value_r"][path_slice] = target_value_r
         self.buffers[idx]["target_value_c"][path_slice] = target_value_c
-
+        self.buffers[idx]["ensemble_target_value_r"][path_slice] = target_value_r_ensemble
+        self.buffers[idx]["ensemble_target_value_c"][path_slice] = target_value_c_ensemble
         self.path_start_idx_list[idx] = self.ptr_list[idx]
 
     def get(self) -> dict[str, torch.Tensor]:
@@ -198,6 +249,43 @@ def calculate_adv_and_value_targets(
     deltas = rewards[:-1] + gamma * values[1:] - values[:-1]
     adv = discount_cumsum(deltas, gamma * lam)
     target_value = adv + values[:-1]
+    return adv, target_value
+
+
+
+def calculate_adv_and_value_targets_ensemble(
+    values: torch.Tensor,
+    rewards: torch.Tensor,
+    lam: float,
+    gamma: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Calculate GAE advantages and value targets for an ensemble of critics.
+
+    Args:
+        values (torch.Tensor): Value predictions from the ensemble, shape (num_critics, T+1, ...).
+        rewards (torch.Tensor): Rewards, shape (num_critics, T, ...).
+        lam (float): GAE lambda.
+        gamma (float): Discount factor.
+
+    Returns:
+        adv (torch.Tensor): Advantages, shape (num_critics, T, ...).
+        target_value (torch.Tensor): Value targets, shape (num_critics, T, ...).
+    """
+    # values: (num_critics, T+1, ...)
+    # rewards: (num_critics, T, ...)
+    num_critics = values.shape[1]
+    adv = []
+    target_value = []
+    for i in range(num_critics):
+        # For each critic, compute deltas and discounted cumsum
+        deltas = rewards[:-1] + gamma * values[1:, i] - values[:-1, i]
+        adv_i = discount_cumsum(deltas, gamma * lam)
+        target_value_i = adv_i + values[:-1, i]
+        adv.append(adv_i)
+        target_value.append(target_value_i)
+    adv = torch.stack(adv, dim=1)
+    target_value = torch.stack(target_value, dim=1)
     return adv, target_value
 
 def _flatten(T, N, x):

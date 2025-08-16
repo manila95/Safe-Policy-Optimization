@@ -191,6 +191,20 @@ class VCritic(nn.Module):
             return torch.squeeze(self.critic(obs), -1)
 
 
+class EnsembleVCritic(nn.Module):
+    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, use_layer_norm=False, num_critics=5):
+        super().__init__()
+        self.use_risk = use_risk
+        self.critics = nn.ModuleList([VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, use_layer_norm=use_layer_norm) for _ in range(num_critics)])
+        self.num_critics = num_critics
+        
+    def forward(self, obs, risk=None):
+        return torch.stack([critic(obs, risk) for critic in self.critics], dim=0)
+
+
+
+
+
 class ActorVCritic(nn.Module):
     """
     Actor-critic policy for reinforcement learning.

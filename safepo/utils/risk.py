@@ -74,27 +74,53 @@ def compute_fear(costs, max_dist=1000, type_="other"):
 
 class ReplayBuffer:
 	def __init__(self, buffer_size=1e6):
+		self.buffer_size = int(buffer_size)
 		self.next_obs = None 
 		self.risks = None 
 		self.dist_to_fail = None 
+		self.pos = 0
+		self.full = False
 
 	def add(self, next_obs, risk, dist_to_fail):
-		self.next_obs = next_obs if self.next_obs is None else torch.cat([self.next_obs, next_obs], axis=0)
-		self.risks = risk if self.risks is None else torch.cat([self.risks, risk], axis=0)
-		self.dist_to_fail = dist_to_fail if self.dist_to_fail is None else torch.cat([self.dist_to_fail, dist_to_fail], axis=0)
+		# Initialize buffers if not already done
+		if self.next_obs is None:
+			# Determine the shape from the first observation
+			obs_shape = next_obs.shape[1:] if len(next_obs.shape) > 1 else (next_obs.shape[0],)
+			risk_shape = risk.shape[1:] if len(risk.shape) > 1 else (risk.shape[0],)
+			dist_shape = dist_to_fail.shape[1:] if len(dist_to_fail.shape) > 1 else (dist_to_fail.shape[0],)
+			
+			self.next_obs = torch.zeros((self.buffer_size,) + obs_shape, dtype=next_obs.dtype, device=next_obs.device)
+			self.risks = torch.zeros((self.buffer_size,) + risk_shape, dtype=risk.dtype, device=risk.device)
+			self.dist_to_fail = torch.zeros((self.buffer_size,) + dist_shape, dtype=dist_to_fail.dtype, device=dist_to_fail.device)
+		
+		# Store data at current position
+		self.next_obs[self.pos] = next_obs
+		self.risks[self.pos] = risk
+		self.dist_to_fail[self.pos] = dist_to_fail
+		
+		# Update position
+		self.pos = (self.pos + 1) % self.buffer_size
+		if self.pos == 0:
+			self.full = True
 
 	def __len__(self):
-		if self.next_obs is not None:
-			return self.next_obs.size()[0]
-		else:
+		if self.next_obs is None:
 			return 0
+		return self.buffer_size if self.full else self.pos
 
 	def sample(self, sample_size):
-		idx = range(self.next_obs.size()[0])
-		sample_idx = np.random.choice(idx, sample_size)
-		return {"next_obs": self.next_obs[sample_idx],
-				"risks": self.risks[sample_idx], 
-				"dist_to_fail": self.dist_to_fail[sample_idx]}
+		if self.next_obs is None or len(self) == 0:
+			raise ValueError("Buffer is empty")
+		
+		# Sample indices
+		max_idx = len(self)
+		sample_idx = np.random.choice(max_idx, min(sample_size, max_idx), replace=False)
+		
+		return {
+			"next_obs": self.next_obs[sample_idx],
+			"risks": self.risks[sample_idx], 
+			"dist_to_fail": self.dist_to_fail[sample_idx]
+		}
 	
 
 

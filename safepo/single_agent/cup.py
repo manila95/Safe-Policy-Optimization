@@ -36,11 +36,12 @@ from torch.optim.lr_scheduler import LinearLR
 from torch.utils.data import DataLoader, TensorDataset
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
+from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
 from safepo.common.lagrange import Lagrange
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
+from safepo.single_agent.utils import *
 
 CUP_LAMBDA=0.95
 CUP_NU=0.20
@@ -66,6 +67,13 @@ isaac_gym_specific_cfg = {
     'max_grad_norm': 1.0,
     'use_critic_norm': False,
 }
+def env_fn(env_id):
+    if "Safety" in env_id:
+        return make_sa_safetygym_env
+    else:
+        return make_sa_gymrobot_env
+
+
 
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
@@ -76,23 +84,21 @@ def main(args, cfg_env=None):
     torch.set_num_threads(4)
     device = torch.device(f'{args.device}:{args.device_id}')
 
-
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
-            num_envs=args.num_envs, env_id=args.task, seed=args.seed
+        env, obs_space, act_space = env_fn(args.task)(
+            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        eval_env, _, _ = make_sa_mujoco_env(num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = env_fn(args.task)(args, num_envs=1, env_id=args.task, seed=None)
         config = default_cfg
 
     else:
-        sim_params = parse_sim_params(args, cfg_env, None)
-        env = make_sa_isaac_env(args=args, cfg=cfg_env, sim_params=sim_params)
+        sim_params = parse_sim_params(cfg_env, None)
+        env = make_sa_isaac_env(cfg=cfg_env, sim_params=sim_params)
         eval_env = env
         obs_space = env.observation_space
         act_space = env.action_space
         args.num_envs = env.num_envs
         config = isaac_gym_specific_cfg
-
     # set training steps
     steps_per_epoch = config.get("steps_per_epoch", args.steps_per_epoch)
     total_steps = config.get("total_steps", args.total_steps)
@@ -146,6 +152,8 @@ def main(args, cfg_env=None):
     rew_deque = deque(maxlen=50)
     cost_deque = deque(maxlen=50)
     len_deque = deque(maxlen=50)
+    success_deque = deque(maxlen=50)
+    total_violations = 0
     eval_rew_deque = deque(maxlen=50)
     eval_cost_deque = deque(maxlen=50)
     eval_len_deque = deque(maxlen=50)
@@ -154,7 +162,8 @@ def main(args, cfg_env=None):
     logger.log("Start with training.")
     obs, _ = env.reset()
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
-    ep_ret, ep_cost, ep_len = (
+    ep_ret, ep_cost, ep_len, ep_success = (
+        np.zeros(args.num_envs),
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
@@ -172,6 +181,17 @@ def main(args, cfg_env=None):
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
+            
+            # Track success for each environment
+            success = 0
+            if "success" in info:
+                if args.task in isaac_gym_map.keys():
+                    success = info["success"]
+                else:
+                    success = info["success"]
+            else:
+                success = 0
+            ep_success += success.cpu().numpy() if args.task in isaac_gym_map.keys() else success
             next_obs, reward, cost, terminated, truncated = (
                 torch.as_tensor(x, dtype=torch.float32, device=device)
                 for x in (next_obs, reward, cost, terminated, truncated)
@@ -221,16 +241,27 @@ def main(args, cfg_env=None):
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
+                        success_deque.append(ep_success[idx])
+                        total_violations += np.sum(ep_cost[idx] > args.cost_limit)
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),
                                 "Metrics/EpCost": np.mean(cost_deque),
                                 "Metrics/EpLen": np.mean(len_deque),
+                                "Metrics/EpCostStd": np.std(cost_deque),
+                                "Metrics/EpRetStd": np.std(rew_deque),
+                                "Metrics/EpLenStd": np.std(len_deque),
+                                "Metrics/EpSuccess": np.mean(success_deque),
+                                "Metrics/EpSuccessStd": np.std(success_deque),
+                                "Metrics/TotalCost": np.sum(cost_deque),
+                                "Metrics/ViolationRate": np.mean(np.array(cost_deque) > args.cost_limit),
+                                "Metrics/TotalViolation": total_violations,
                             }
                         )
                         ep_ret[idx] = 0.0
                         ep_cost[idx] = 0.0
                         ep_len[idx] = 0.0
+                        ep_success[idx] = 0.0
                         logger.logged = False
 
                     buffer.finish_path(
@@ -267,6 +298,61 @@ def main(args, cfg_env=None):
                     "Metrics/EvalEpRet": np.mean(eval_rew),
                     "Metrics/EvalEpCost": np.mean(eval_cost),
                     "Metrics/EvalEpLen": np.mean(eval_len),
+                }
+            )
+        if epoch % 20 == 0:
+            # Evaluate critic performance using fresh rollouts
+            critic_metrics = evaluate_critic_performance_from_rollouts(
+                args=args,
+                policy=policy,
+                env=env,
+                num_episodes=eval_episodes,
+                max_ep_len=1000,  # Maximum episode length
+                device=device,
+                gamma=config['gamma'],
+                use_risk=args.use_risk,
+                risk_model=risk_train.model if args.use_risk else None,
+                create_plots=True
+            )
+
+            # Log the critic evaluation metrics
+            logger.store(
+                **{
+                    # Reward critic metrics
+                    "Reward Value/EstimationError": critic_metrics['reward_critic']['mean_error'],
+                    "Reward Value/MeanAbsError": critic_metrics['reward_critic']['mean_abs_error'],
+                    "Reward Value/OverestimationRatio": critic_metrics['reward_critic']['overestimation_ratio'],
+                    "Reward Value/UnderestimationRatio": critic_metrics['reward_critic']['underestimation_ratio'],
+                    "Reward Value/MaxError": critic_metrics['reward_critic']['max_error'],
+                    "Reward Value/PearsonCorr": critic_metrics['reward_critic']['pearson_corr'],
+                    "Reward Value/SpearmanCorr": critic_metrics['reward_critic']['spearman_corr'],
+                    "Reward Value/KendallCorr": critic_metrics['reward_critic']['kendall_corr'],
+                    "Reward Value/MeanPredicted": critic_metrics['reward_critic']['mean_value'],
+                    "Reward Value/StdPredicted": critic_metrics['reward_critic']['std_value'],
+                    "Reward Value/MinPredicted": critic_metrics['reward_critic']['min_value'],
+                    "Reward Value/MaxPredicted": critic_metrics['reward_critic']['max_value'],
+                    "Reward Value/MeanMCReturn": critic_metrics['reward_critic']['mean_mc_return'],
+                    "Reward Value/StdMCReturn": critic_metrics['reward_critic']['std_mc_return'],
+                    "Reward Value/MinMCReturn": critic_metrics['reward_critic']['min_mc_return'],
+                    "Reward Value/MaxMCReturn": critic_metrics['reward_critic']['max_mc_return'],
+                    
+                    # Cost critic metrics
+                    "Cost Value/EstimationError": critic_metrics['cost_critic']['mean_error'],
+                    "Cost Value/MeanAbsError": critic_metrics['cost_critic']['mean_abs_error'],
+                    "Cost Value/OverestimationRatio": critic_metrics['cost_critic']['overestimation_ratio'],
+                    "Cost Value/UnderestimationRatio": critic_metrics['cost_critic']['underestimation_ratio'],
+                    "Cost Value/MaxError": critic_metrics['cost_critic']['max_error'],
+                    "Cost Value/PearsonCorr": critic_metrics['cost_critic']['pearson_corr'],
+                    "Cost Value/SpearmanCorr": critic_metrics['cost_critic']['spearman_corr'],
+                    "Cost Value/KendallCorr": critic_metrics['cost_critic']['kendall_corr'],
+                    "Cost Value/MeanPredicted": critic_metrics['cost_critic']['mean_value'],
+                    "Cost Value/StdPredicted": critic_metrics['cost_critic']['std_value'],
+                    "Cost Value/MinPredicted": critic_metrics['cost_critic']['min_value'],
+                    "Cost Value/MaxPredicted": critic_metrics['cost_critic']['max_value'],
+                    "Cost Value/MeanMCReturn": critic_metrics['cost_critic']['mean_mc_return'],
+                    "Cost Value/StdMCReturn": critic_metrics['cost_critic']['std_mc_return'],
+                    "Cost Value/MinMCReturn": critic_metrics['cost_critic']['min_mc_return'],
+                    "Cost Value/MaxMCReturn": critic_metrics['cost_critic']['max_mc_return'],
                 }
             )
 
@@ -409,6 +495,48 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpRet")
             logger.log_tabular("Metrics/EpCost")
             logger.log_tabular("Metrics/EpLen")
+            logger.log_tabular("Metrics/EpSuccess")
+            logger.log_tabular("Metrics/EpSuccessStd")
+            logger.log_tabular("Metrics/TotalCost")
+            logger.log_tabular("Metrics/ViolationRate")
+            logger.log_tabular("Metrics/TotalViolation")
+            logger.log_tabular("Metrics/EpCostStd")
+            logger.log_tabular("Metrics/EpRetStd")
+            logger.log_tabular("Metrics/EpLenStd")
+            if epoch % 20 == 0:
+                # Add critic evaluation metrics
+                logger.log_tabular("Reward Value/EstimationError")
+                logger.log_tabular("Reward Value/MeanAbsError") 
+                logger.log_tabular("Reward Value/OverestimationRatio")
+                logger.log_tabular("Reward Value/UnderestimationRatio")
+                logger.log_tabular("Reward Value/MaxError")
+                logger.log_tabular("Reward Value/PearsonCorr")
+                logger.log_tabular("Reward Value/SpearmanCorr")
+                logger.log_tabular("Reward Value/KendallCorr")
+                logger.log_tabular("Reward Value/MeanPredicted")
+                logger.log_tabular("Reward Value/StdPredicted")
+                logger.log_tabular("Reward Value/MeanMCReturn")
+                logger.log_tabular("Reward Value/StdMCReturn")
+                logger.log_tabular("Reward Value/MinMCReturn")
+                logger.log_tabular("Reward Value/MaxMCReturn")
+                logger.log_tabular("Reward Value/MinPredicted")
+                logger.log_tabular("Reward Value/MaxPredicted")
+                logger.log_tabular("Cost Value/EstimationError")
+                logger.log_tabular("Cost Value/MeanAbsError")
+                logger.log_tabular("Cost Value/OverestimationRatio")
+                logger.log_tabular("Cost Value/UnderestimationRatio")
+                logger.log_tabular("Cost Value/MaxError")
+                logger.log_tabular("Cost Value/PearsonCorr")
+                logger.log_tabular("Cost Value/SpearmanCorr")
+                logger.log_tabular("Cost Value/KendallCorr")
+                logger.log_tabular("Cost Value/MeanPredicted")
+                logger.log_tabular("Cost Value/StdPredicted")
+                logger.log_tabular("Cost Value/MinPredicted")
+                logger.log_tabular("Cost Value/MaxPredicted")
+                logger.log_tabular("Cost Value/MeanMCReturn")
+                logger.log_tabular("Cost Value/StdMCReturn")
+                logger.log_tabular("Cost Value/MinMCReturn")
+                logger.log_tabular("Cost Value/MaxMCReturn")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")

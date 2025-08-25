@@ -37,7 +37,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import matplotlib.pyplot as plt
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
+from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic, RiskEst
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
@@ -160,6 +160,13 @@ def fvp(
 
     return flat_grad_grad_kl + params * 0.1
 
+def env_fn(env_id):
+    if "Safety" in env_id:
+        return make_sa_safetygym_env
+    else:
+        return make_sa_gymrobot_env
+
+
 
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
@@ -170,19 +177,16 @@ def main(args, cfg_env=None):
     torch.set_num_threads(4)
     device = torch.device(f'{args.device}:{args.device_id}')
 
-
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
+        env, obs_space, act_space = env_fn(args.task)(
             args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        # eval_env, obs_space, act_space = make_sa_mujoco_env(
-        #     args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
-        # )
+        eval_env, _, _ = env_fn(args.task)(args, num_envs=1, env_id=args.task, seed=None)
         config = default_cfg
 
     else:
-        sim_params = parse_sim_params(args, cfg_env, None)
-        env = make_sa_isaac_env(args=args, cfg=cfg_env, sim_params=sim_params)
+        sim_params = parse_sim_params(cfg_env, None)
+        env = make_sa_isaac_env(cfg=cfg_env, sim_params=sim_params)
         eval_env = env
         obs_space = env.observation_space
         act_space = env.action_space
@@ -244,11 +248,14 @@ def main(args, cfg_env=None):
     logger.log("Start with training.")
     obs, _ = env.reset()
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
-    ep_ret, ep_cost, ep_len = (
+    ep_ret, ep_cost, ep_len, ep_success = (
+        np.zeros(args.num_envs),
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
         np.zeros(args.num_envs),
     )
+    success_deque = deque(maxlen=50)
+    total_violations = 0
 
     total_cost, eval_total_cost = 0, 0
     f_next_obs, f_costs = None, None
@@ -262,10 +269,20 @@ def main(args, cfg_env=None):
                 risk = torch.exp(risk_train.model(obs)) if args.use_risk else None
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
-            next_obs, reward, cost, terminated, truncated, info = env.step(action)
-
+            if "Safe" in args.task:
+                next_obs, reward, cost, terminated, truncated, info = env.step(action)
+                success = 0
+            else:
+                next_obs, reward, terminated, truncated, info = env.step(action)
+                try:
+                    cost = info["cost"]
+                    success = info["success"]
+                except:
+                    cost = terminated
+                    success = 0
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
+            ep_success += success.cpu().numpy() if args.task in isaac_gym_map.keys() else success
             ep_len += 1
             next_obs, reward, cost, terminated, truncated = (
                 torch.as_tensor(x, dtype=torch.float32, device=device)
@@ -333,11 +350,21 @@ def main(args, cfg_env=None):
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
+                        success_deque.append(ep_success[idx])
+                        total_violations += np.sum(ep_cost[idx] > args.cost_limit)
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),
                                 "Metrics/EpCost": np.mean(cost_deque),
                                 "Metrics/EpLen": np.mean(len_deque),
+                                "Metrics/EpCostStd": np.std(cost_deque),
+                                "Metrics/EpRetStd": np.std(rew_deque),
+                                "Metrics/EpLenStd": np.std(len_deque),
+                                "Metrics/EpSuccess": np.mean(success_deque),
+                                "Metrics/EpSuccessStd": np.std(success_deque),
+                                "Metrics/TotalCost": total_cost,
+                                "Metrics/ViolationRate": np.mean(np.array(cost_deque) > args.cost_limit),
+                                "Metrics/TotalViolation": total_violations,
                             }
                         )
                         ep_ret[idx] = 0.0
@@ -386,6 +413,7 @@ def main(args, cfg_env=None):
         if epoch % 20 == 0:
             # Evaluate critic performance using fresh rollouts
             critic_metrics = evaluate_critic_performance_from_rollouts(
+                args=args,
                 policy=policy,
                 env=env,
                 num_episodes=eval_episodes,
@@ -705,6 +733,15 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpRet")
             logger.log_tabular("Metrics/EpCost")
             logger.log_tabular("Metrics/EpLen")
+            logger.log_tabular("Metrics/EpSuccess")
+            logger.log_tabular("Metrics/EpSuccessStd")
+            logger.log_tabular("Metrics/TotalCost")
+            logger.log_tabular("Metrics/ViolationRate")
+            logger.log_tabular("Metrics/TotalViolation")
+            logger.log_tabular("Metrics/EpCostStd")
+            logger.log_tabular("Metrics/EpRetStd")
+            logger.log_tabular("Metrics/EpLenStd")
+            
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")

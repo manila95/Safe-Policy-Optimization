@@ -36,7 +36,7 @@ import gymnasium as gym
 
 import gymnasium as gym 
 from gymnasium.vector.async_vector_env import AsyncState, AsyncVectorEnv
-
+from gymnasium.vector import SyncVectorEnv
 
 def make_sa_gymrobot_env(args,num_envs: int, env_id: str, seed: int|None = None):
     """
@@ -68,7 +68,7 @@ def make_sa_gymrobot_env(args,num_envs: int, env_id: str, seed: int|None = None)
             env = SafeRescaleAction(env, -1.0, 1.0)
             return env
         env_fns = [create_env for _ in range(num_envs)]
-        env = AsyncVectorEnv(env_fns)
+        env = SyncVectorEnv(env_fns)
         env = SafeGymNormalizeObservation(env)
         try:
             env.reset(seed=seed)

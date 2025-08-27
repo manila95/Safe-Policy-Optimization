@@ -20,6 +20,7 @@ import os
 import random
 import sys
 import time
+import gc
 from collections import deque
 from typing import Callable
 
@@ -31,10 +32,12 @@ except ImportError:
     
 import wandb
 import torch
+import tqdm
 import torch.nn as nn
 import torch.optim
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
+import matplotlib.pyplot as plt
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
 from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
@@ -73,31 +76,6 @@ isaac_gym_specific_cfg = {
 }
 
 
-from torch.func import functional_call, vmap, grad
-
-def per_sample_grads(model: nn.Module, loss_fn, s, a, p, adv):
-    """
-    Returns a dict {param_name: (B, *param.shape)} with per-sample grads.
-    """
-    # 1) Collect params in a (name -> tensor) dict
-    params = {k: v for k, v in model.named_parameters()}
-
-    # 2) Define single-sample loss (must return a scalar)
-    def single_loss(params, s_i, a_i, p_i, adv_i):
-        # forward with explicit params (stateless)
-        out = functional_call(model, params, (s_i.unsqueeze(0),))
-        # make sure loss is scalar for this single item
-        return loss_fn(out, a_i.unsqueeze(0), p_i.unsqueeze(0), adv_i.unsqueeze(0))
-
-    # 3) Vectorize "grad ∘ single_loss" over the batch
-    grads_per_sample = vmap(grad(single_loss), in_dims=(None, 0, 0, 0, 0))(params, s, a, p, adv)
-    return grads_per_sample  # dict of tensors shaped (B, *param.shape)
-
-
-def loss_fn(out, a_i, p_i, adv_i):
-    return -adv_i * torch.exp(out.log_prob(a_i) - p_i)
-
-
 def compute_sam_gradients_v1_per_sample(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10, num_samples=10):
     """Compute Sharpness Aware Minimization gradients.
     
@@ -118,7 +96,7 @@ def compute_sam_gradients_v1_per_sample(fvp, policy, data, advantage_lag, advant
     base_loss = -(ratio * advantage_lag).mean()
     
     # Compute gradients
-    base_loss.backward(retain_graph=True)
+    base_loss.backward()
     grads = get_flat_gradients_from(policy.actor)
     grad_norm = torch.norm(grads)
     
@@ -582,14 +560,20 @@ def main(args, cfg_env=None):
                 reward_fig = critic_metrics['reward_critic']['plot_fig']
                 reward_img = wandb.Image(reward_fig)
                 wandb.log({"plots/reward_value_scatter": reward_img})
-                plt.close(reward_fig)
+                # plt.close(reward_fig)
             
             if 'plot_fig' in critic_metrics['cost_critic']:
                 # Convert matplotlib figure to image
                 cost_fig = critic_metrics['cost_critic']['plot_fig']
                 cost_img = wandb.Image(cost_fig)
                 wandb.log({"plots/cost_value_scatter": cost_img})
-                plt.close(cost_fig)
+                # plt.close(cost_fig)
+            
+            # Clear memory after critic evaluation
+            del critic_metrics
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            gc.collect()
+
         eval_start_time = time.time()
 
         eval_episodes = 1 if epoch < epochs - 1 else 10
@@ -684,49 +668,196 @@ def main(args, cfg_env=None):
             grads = -sam_grads
             # Log gradient differences every 50 epochs
             if epoch % 50 == 0:
+                # Clear memory before starting expensive computation
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                gc.collect()
                 
+                # Compute per-sample gradients for original parameters
+                original_grads = []
+                for i in tqdm.tqdm(range(data["obs"].size(0))):
+                    obs_i = data["obs"][i:i+1]
+                    act_i = data["act"][i:i+1]
+                    log_prob_i = data["log_prob"][i:i+1]
+                    adv_i = advantage[i:i+1]
+                    
+                    temp_distribution = policy.actor(obs_i, data["risk"][i:i+1] if data["risk"] is not None else None)
+                    log_prob_new = temp_distribution.log_prob(act_i).sum(dim=-1)
+                    ratio = torch.exp(log_prob_new - log_prob_i)
+                    loss = -(ratio * adv_i).mean()
+                    
+                    policy.actor.zero_grad()
+                    loss.backward()  # Removed retain_graph=True to free memory
+                    
+                    grads_per_sample = []
+                    for param in policy.actor.parameters():
+                        if param.grad is not None:
+                            grads_per_sample.append(param.grad.clone().detach().flatten())
+                    
+                    if grads_per_sample:
+                        original_grads.append(torch.cat(grads_per_sample))
+                    
+                    # Clear intermediate tensors to free memory
+                    # del obs, act, log_prob, adv, temp_distribution, log_prob_new, ratio, loss
+                    if i % 100 == 0:  # Periodic memory cleanup
+                        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                        gc.collect()
+                
+                original_grads = torch.stack(original_grads)
+                
+                # Compute per-sample gradients for perturbed parameters
+                # First restore perturbed parameters
+                for param, e_w in zip(policy.actor.parameters(), perturbed_params):
+                    if param.grad is None:
+                        continue
+                    param.data.add_(e_w)
+                
+                perturbed_grads = []
+                for i in tqdm.tqdm(range(data["obs"].size(0))):
+                    obs_i = data["obs"][i:i+1]
+                    act_i = data["act"][i:i+1]
+                    log_prob_i = data["log_prob"][i:i+1]
+                    adv_i = advantage[i:i+1]
+                    
+                    temp_distribution = policy.actor(obs_i, data["risk"][i:i+1] if data["risk"] is not None else None)
+                    log_prob_new = temp_distribution.log_prob(act_i).sum(dim=-1)
+                    ratio = torch.exp(log_prob_new - log_prob_i)
+                    loss = -(ratio * adv_i).mean()
+                    policy.actor.zero_grad()
+                    loss.backward()  # Removed retain_graph=True to free memory
+                    
+                    grads_per_sample = []
+                    for param in policy.actor.parameters():
+                        if param.grad is not None:
+                            grads_per_sample.append(param.grad.clone().detach().flatten())
+                
+                    if grads_per_sample:
+                        perturbed_grads.append(torch.cat(grads_per_sample))
+                    
+                    # Clear intermediate tensors to free memory
+                    # del obs_i, act_i, log_prob_i, adv_i, temp_distribution, log_prob_new, ratio, loss
+                    if i % 100 == 0:  # Periodic memory cleanup
+                        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                        gc.collect()
+                
+                perturbed_grads = torch.stack(perturbed_grads)
+                
+                # Restore original parameters
+                for param, e_w in zip(policy.actor.parameters(), perturbed_params):
+                    if param.grad is None:
+                        continue
+                    param.data.sub_(e_w)
+                
+                # print(original_grads.shape, perturbed_grads.shape)
+                # Compute gradient difference norms per sample
+                grad_diff_norm = []
+                for i in tqdm.tqdm(range(data["obs"].size(0))):
+                    diff = original_grads[i] - perturbed_grads[i]
+                    grad_diff_norm.append(torch.norm(diff))
+                
+                # print(torch.stack(grad_diff_norm).shape)
 
-                
-                # Compute non-SAM gradients for comparison
-                non_sam_grads = per_sample_grads(policy.actor, loss_fn, data["obs"], data["act"], data["log_prob"], advantage)
-                # Compute gradient differences
-                print(non_sam_grads[non_sam_grads.keys()[0]].shape)
-                grad_diff = sam_grads - non_sam_grads
-                grad_diff_norm = torch.norm(grad_diff, dim=-1)
-
-                
                 # Create scatter plot data for each advantage type
                 scatter_data_adv = []
                 scatter_data_adv_c = []
                 scatter_data_adv_r = []
+                scatter_data_likelihood = []
+                scatter_data_adv_likelihood = []
+                scatter_data_adv_c_likelihood = []
+                scatter_data_adv_r_likelihood = []
                 
                 for i in range(len(advantage)):
                     scatter_data_adv.append([advantage[i].item(), grad_diff_norm[i].item()])
                     scatter_data_adv_c.append([data["adv_c"][i].item(), grad_diff_norm[i].item()])
                     scatter_data_adv_r.append([data["adv_r"][i].item(), grad_diff_norm[i].item()])
+                    scatter_data_likelihood.append([data["log_prob"][i].item(), grad_diff_norm[i].item()])
+                    scatter_data_adv_likelihood.append([(advantage[i] / data["log_prob"][i]).item(), grad_diff_norm[i].item()])
+                    scatter_data_adv_c_likelihood.append([(data["adv_c"][i] / data["log_prob"][i]).item(), grad_diff_norm[i].item()])
+                    scatter_data_adv_r_likelihood.append([(data["adv_r"][i] / data["log_prob"][i]).item(), grad_diff_norm[i].item()])
                 
                 scatter_data_adv = np.array(scatter_data_adv)
                 scatter_data_adv_c = np.array(scatter_data_adv_c)
                 scatter_data_adv_r = np.array(scatter_data_adv_r)
-                
+                scatter_data_likelihood = np.array(scatter_data_likelihood)
+                scatter_data_adv_likelihood = np.array(scatter_data_adv_likelihood)
+                scatter_data_adv_c_likelihood = np.array(scatter_data_adv_c_likelihood)
+                scatter_data_adv_r_likelihood = np.array(scatter_data_adv_r_likelihood)
+
+                import matplotlib.pyplot as plt
+
+                # Create scatter plots in a grid
+                fig, axs = plt.subplots(2, 3, figsize=(18, 10))
+
+                axs[0, 0].scatter(scatter_data_adv[:, 0], scatter_data_adv[:, 1], alpha=0.5)
+                axs[0, 0].set_title('Advantage vs Gradient Difference Norm')
+                axs[0, 0].set_xlabel('Advantage')
+                axs[0, 0].set_ylabel('Gradient Difference Norm')
+
+                axs[0, 1].scatter(scatter_data_adv_c[:, 0], scatter_data_adv_c[:, 1], alpha=0.5)
+                axs[0, 1].set_title('Cost Advantage vs Gradient Difference Norm')
+                axs[0, 1].set_xlabel('Cost Advantage')
+                axs[0, 1].set_ylabel('Gradient Difference Norm')
+
+                axs[0, 2].scatter(scatter_data_adv_r[:, 0], scatter_data_adv_r[:, 1], alpha=0.5)
+                axs[0, 2].set_title('Reward Advantage vs Gradient Difference Norm')
+                axs[0, 2].set_xlabel('Reward Advantage')
+                axs[0, 2].set_ylabel('Gradient Difference Norm')
+
+                axs[1, 0].scatter(scatter_data_likelihood[:, 0], scatter_data_likelihood[:, 1], alpha=0.5)
+                axs[1, 0].set_title('Likelihood vs Gradient Difference Norm')
+                axs[1, 0].set_xlabel('Likelihood')
+                axs[1, 0].set_ylabel('Gradient Difference Norm')
+
+                axs[1, 1].scatter(scatter_data_adv_likelihood[:, 0], scatter_data_adv_likelihood[:, 1], alpha=0.5)
+                axs[1, 1].set_title('Advantage/Likelihood vs Gradient Difference Norm')
+                axs[1, 1].set_xlabel('Advantage/Likelihood')
+                axs[1, 1].set_ylabel('Gradient Difference Norm')
+
+                axs[1, 2].scatter(scatter_data_adv_c_likelihood[:, 0], scatter_data_adv_c_likelihood[:, 1], alpha=0.5)
+                axs[1, 2].set_title('Cost Advantage/Likelihood vs Gradient Difference Norm')
+                axs[1, 2].set_xlabel('Cost Advantage/Likelihood')
+                axs[1, 2].set_ylabel('Gradient Difference Norm')
+
+                plt.tight_layout()
+
+                # Save the plot to a file
+                plot_filename = "gradient_analysis_scatter.png"
+                plt.savefig(plot_filename)
+                plt.close()
+
+                # Send the image to wandb
+                wandb.log({"gradient_analysis/scatter_plots": wandb.Image(plot_filename)}, step=epoch)
                 # Log to wandb
-                if args.wandb_log:
+                if True:
+                    # Calculate mean and variance for gradient difference norms
+                    grad_diff_mean = np.mean(grad_diff_norm)
+                    grad_diff_var = np.var(grad_diff_norm)
+
+                    original_grad_mean = torch.mean(original_grads).item()
+                    original_grad_var = torch.var(original_grads).item()
+                    perturbed_grad_mean = torch.mean(perturbed_grads).item()
+                    perturbed_grad_var = torch.var(perturbed_grads).item()
+
+                    
+
+                    # Log scatter plots and additional metrics to wandb
                     wandb.log({
-                        "gradient_analysis/advantage_vs_grad_diff": wandb.Scatter(
-                            data=scatter_data_adv,
-                            keys=["Advantage", "Gradient Difference Norm"]
-                        ),
-                        "gradient_analysis/cost_advantage_vs_grad_diff": wandb.Scatter(
-                            data=scatter_data_adv_c, 
-                            keys=["Cost Advantage", "Gradient Difference Norm"]
-                        ),
-                        "gradient_analysis/reward_advantage_vs_grad_diff": wandb.Scatter(
-                            data=scatter_data_adv_r,
-                            keys=["Reward Advantage", "Gradient Difference Norm"]
-                        )
+                        "gradient_analysis/grad_diff_mean": grad_diff_mean,
+                        "gradient_analysis/grad_diff_var": grad_diff_var,
+                        "gradient_analysis/original_grad_mean": original_grad_mean,
+                        "gradient_analysis/original_grad_var": original_grad_var,
+                        "gradient_analysis/perturbed_grad_mean": perturbed_grad_mean,
+                        "gradient_analysis/perturbed_grad_var": perturbed_grad_var
                     }, step=epoch)
-                # Reset gradients
+                # Reset gradients and clear memory
                 policy.actor.zero_grad()
+                
+                # Clear large tensors and free memory
+                del original_grads, perturbed_grads, grad_diff_norm
+                del scatter_data_adv, scatter_data_adv_c, scatter_data_adv_r
+                del scatter_data_likelihood, scatter_data_adv_likelihood
+                del scatter_data_adv_c_likelihood, scatter_data_adv_r_likelihood
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                gc.collect()
 
         else:
             temp_distribution = policy.actor(data["obs"], data["risk"])
@@ -1023,8 +1154,10 @@ def main(args, cfg_env=None):
                 #         },
                 #         itr = epoch
                 #     )
-        ## Garbage Collection 
+        ## Garbage Collection and Memory Cleanup
         data, dataloader = None, None
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        gc.collect()
     ## Save Policy 
     torch.save(policy.state_dict(), os.path.join(args.log_dir, "policy.pt"))
     wandb.save(os.path.join(args.log_dir, "policy.pt"))

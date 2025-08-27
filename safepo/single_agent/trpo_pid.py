@@ -73,6 +73,80 @@ isaac_gym_specific_cfg = {
 }
 
 
+from torch.func import functional_call, vmap, grad
+
+def per_sample_grads(model: nn.Module, loss_fn, s, a, p, adv):
+    """
+    Returns a dict {param_name: (B, *param.shape)} with per-sample grads.
+    """
+    # 1) Collect params in a (name -> tensor) dict
+    params = {k: v for k, v in model.named_parameters()}
+
+    # 2) Define single-sample loss (must return a scalar)
+    def single_loss(params, s_i, a_i, p_i, adv_i):
+        # forward with explicit params (stateless)
+        out = functional_call(model, params, (s_i.unsqueeze(0),))
+        # make sure loss is scalar for this single item
+        return loss_fn(out, a_i.unsqueeze(0), p_i.unsqueeze(0), adv_i.unsqueeze(0))
+
+    # 3) Vectorize "grad ∘ single_loss" over the batch
+    grads_per_sample = vmap(grad(single_loss), in_dims=(None, 0, 0, 0, 0))(params, s, a, p, adv)
+    return grads_per_sample  # dict of tensors shaped (B, *param.shape)
+
+
+def loss_fn(out, a_i, p_i, adv_i):
+    return -adv_i * torch.exp(out.log_prob(a_i) - p_i)
+
+
+def compute_sam_gradients_v1_per_sample(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10, num_samples=10):
+    """Compute Sharpness Aware Minimization gradients.
+    
+    Args:
+        policy: The policy network
+        data: Dictionary containing observations, actions, etc.
+        advantage: Advantage values
+        rho: Perturbation radius for SAM
+        
+    Returns:
+        sam_grads: The gradients computed at the perturbed point
+        perturbed_params: The perturbed parameters
+    """
+    # First compute the base loss and gradients
+    temp_distribution = policy.actor(data["obs"], data["risk"])
+    log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+    ratio = torch.exp(log_prob - data["log_prob"])
+    base_loss = -(ratio * advantage_lag).mean()
+    
+    # Compute gradients
+    base_loss.backward(retain_graph=True)
+    grads = get_flat_gradients_from(policy.actor)
+    grad_norm = torch.norm(grads)
+    
+    # Compute perturbation
+    scale = rho / (grad_norm + 1e-12)
+    perturbed_params = []
+    for param in policy.actor.parameters():
+        if param.grad is None:
+            continue
+        e_w = param.grad * scale.to(param)
+        perturbed_params.append(e_w)
+        param.data.add_(e_w)
+    
+    # Compute loss and gradients at perturbed point
+    policy.actor.zero_grad()
+    sam_grads = per_sample_grads(policy.actor, loss_fn, data["obs"], data["act"], data["log_prob"], advantage_lag)
+    print(sam_grads[sam_grads.keys()[0]].shape)
+    # Get gradients at perturbed point
+    # sam_grads = get_flat_gradients_from(policy.actor)
+    
+    # Restore original parameters
+    for param, e_w in zip(policy.actor.parameters(), perturbed_params):
+        if param.grad is None:
+            continue
+        param.data.sub_(e_w)
+    
+    return sam_grads, perturbed_params, None, None, None
+
 def actor_sam_fn(args):
     if args.sam_type == "v1":
         if args.use_kl:
@@ -608,6 +682,51 @@ def main(args, cfg_env=None):
             step_direction = x * alpha
             assert torch.isfinite(step_direction).all(), "step_direction is not finite"
             grads = -sam_grads
+            # Log gradient differences every 50 epochs
+            if epoch % 50 == 0:
+                
+
+                
+                # Compute non-SAM gradients for comparison
+                non_sam_grads = per_sample_grads(policy.actor, loss_fn, data["obs"], data["act"], data["log_prob"], advantage)
+                # Compute gradient differences
+                print(non_sam_grads[non_sam_grads.keys()[0]].shape)
+                grad_diff = sam_grads - non_sam_grads
+                grad_diff_norm = torch.norm(grad_diff, dim=-1)
+
+                
+                # Create scatter plot data for each advantage type
+                scatter_data_adv = []
+                scatter_data_adv_c = []
+                scatter_data_adv_r = []
+                
+                for i in range(len(advantage)):
+                    scatter_data_adv.append([advantage[i].item(), grad_diff_norm[i].item()])
+                    scatter_data_adv_c.append([data["adv_c"][i].item(), grad_diff_norm[i].item()])
+                    scatter_data_adv_r.append([data["adv_r"][i].item(), grad_diff_norm[i].item()])
+                
+                scatter_data_adv = np.array(scatter_data_adv)
+                scatter_data_adv_c = np.array(scatter_data_adv_c)
+                scatter_data_adv_r = np.array(scatter_data_adv_r)
+                
+                # Log to wandb
+                if args.wandb_log:
+                    wandb.log({
+                        "gradient_analysis/advantage_vs_grad_diff": wandb.Scatter(
+                            data=scatter_data_adv,
+                            keys=["Advantage", "Gradient Difference Norm"]
+                        ),
+                        "gradient_analysis/cost_advantage_vs_grad_diff": wandb.Scatter(
+                            data=scatter_data_adv_c, 
+                            keys=["Cost Advantage", "Gradient Difference Norm"]
+                        ),
+                        "gradient_analysis/reward_advantage_vs_grad_diff": wandb.Scatter(
+                            data=scatter_data_adv_r,
+                            keys=["Reward Advantage", "Gradient Difference Norm"]
+                        )
+                    }, step=epoch)
+                # Reset gradients
+                policy.actor.zero_grad()
 
         else:
             temp_distribution = policy.actor(data["obs"], data["risk"])
@@ -918,8 +1037,8 @@ def main(args, cfg_env=None):
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
     import wandb
-    run = wandb.init(config=vars(args), entity="kaustubh95",
-                project="conservatism_in_rl",
+    run = wandb.init(config=vars(args), entity="liam-paull",
+                project="sam-safe-rl",
                 settings=wandb.Settings(_service_wait=60),
                 # monitor_gym=True,
                 sync_tensorboard=True, save_code=True)

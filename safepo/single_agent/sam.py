@@ -156,6 +156,62 @@ def compute_sam_gradients_v1(fvp, policy, data, advantage_lag, advantage_cost, a
     
     return sam_grads, perturbed_params, None, None, None
 
+
+
+
+def compute_sam_gradients_v1_per_sample(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10, num_samples=10):
+    """Compute Sharpness Aware Minimization gradients.
+    
+    Args:
+        policy: The policy network
+        data: Dictionary containing observations, actions, etc.
+        advantage: Advantage values
+        rho: Perturbation radius for SAM
+        
+    Returns:
+        sam_grads: The gradients computed at the perturbed point
+        perturbed_params: The perturbed parameters
+    """
+    # First compute the base loss and gradients
+    temp_distribution = policy.actor(data["obs"], data["risk"])
+    log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+    ratio = torch.exp(log_prob - data["log_prob"])
+    base_loss = -(ratio * advantage_lag).mean()
+    
+    # Compute gradients
+    base_loss.backward(retain_graph=True)
+    grads = get_flat_gradients_from(policy.actor)
+    grad_norm = torch.norm(grads)
+    
+    # Compute perturbation
+    scale = rho / (grad_norm + 1e-12)
+    perturbed_params = []
+    for param in policy.actor.parameters():
+        if param.grad is None:
+            continue
+        e_w = param.grad * scale.to(param)
+        perturbed_params.append(e_w)
+        param.data.add_(e_w)
+    
+    # Compute loss and gradients at perturbed point
+    policy.actor.zero_grad()
+    temp_distribution = policy.actor(data["obs"], data["risk"])
+    log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+    ratio = torch.exp(log_prob - data["log_prob"])
+    perturbed_loss = -(ratio * advantage_lag).mean()
+    perturbed_loss.backward()
+    
+    # Get gradients at perturbed point
+    sam_grads = get_flat_gradients_from(policy.actor)
+    
+    # Restore original parameters
+    for param, e_w in zip(policy.actor.parameters(), perturbed_params):
+        if param.grad is None:
+            continue
+        param.data.sub_(e_w)
+    
+    return sam_grads, perturbed_params, None, None, None
+
 def compute_sam_gradients_v2(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10, num_samples=10):
     """Compute Sharpness Aware Minimization gradients.
     

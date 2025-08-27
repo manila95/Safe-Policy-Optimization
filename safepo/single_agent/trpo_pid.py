@@ -457,7 +457,7 @@ def main(args, cfg_env=None):
                 device=device,
                 gamma=config['gamma'], 
                 use_risk=args.use_risk,
-                risk_model=risk_train.model if args.use_risk else None,
+                risk_model=risk_model if args.use_risk else None,
                 create_plots=True
             )
 
@@ -719,11 +719,11 @@ def main(args, cfg_env=None):
                 target_value_r_b,
                 target_value_c_b,
             ) in dataloader:
-                if args.use_sam_critic:
-                    risk_b = risk_b if args.use_risk else None
-                    
-                    # Update reward critic with SAM
-                    reward_critic_optimizer.zero_grad()
+                risk_b = risk_b if args.use_risk else None
+                
+                # Update reward critic
+                reward_critic_optimizer.zero_grad()
+                if args.use_sam_reward_critic:
                     if args.sam_type == "v4":
                         sam_grads_r, _ = compute_sam_gradients_critic_v4(
                             policy.reward_critic, 
@@ -733,7 +733,7 @@ def main(args, cfg_env=None):
                             num_samples=args.sam_num_samples
                         )
                     else:
-                        sam_grads_r, _ = compute_sam_gradients_critic(
+                        sam_grads_r, _, _, _, _ = compute_sam_gradients_critic(
                             policy.reward_critic, 
                             {"obs": obs_b, "risk": risk_b}, 
                             target_value_r_b,
@@ -747,18 +747,29 @@ def main(args, cfg_env=None):
                                 param.grad += param * 0.001
                     clip_grad_norm_(policy.reward_critic.parameters(), config["max_grad_norm"])
                     reward_critic_optimizer.step()
-                    
-                    # Update cost critic with SAM
-                    cost_critic_optimizer.zero_grad()
+                else:
+                    # Standard reward critic update
+                    loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
+                    if config.get("use_critic_norm", True):
+                        for param in policy.reward_critic.parameters():
+                            loss_r += param.pow(2).sum() * 0.001
+                    loss_r.backward()
+                    clip_grad_norm_(policy.reward_critic.parameters(), config["max_grad_norm"])
+                    reward_critic_optimizer.step()
+                
+                # Update cost critic
+                cost_critic_optimizer.zero_grad()
+                if args.use_sam_cost_critic:
                     if args.sam_type == "v4":
                         sam_grads_c, _ = compute_sam_gradients_critic_v4(
                             policy.cost_critic, 
                             {"obs": obs_b, "risk": risk_b}, 
                             target_value_c_b,
-                            rho=args.sam_rho
+                            rho=args.sam_rho,
+                            num_samples=args.sam_num_samples
                         )
                     else:
-                        sam_grads_c, _ = compute_sam_gradients_critic(
+                        sam_grads_c, _, _, _, _ = compute_sam_gradients_critic(
                             policy.cost_critic, 
                             {"obs": obs_b, "risk": risk_b}, 
                             target_value_c_b,
@@ -772,31 +783,23 @@ def main(args, cfg_env=None):
                                 param.grad += param * 0.001
                     clip_grad_norm_(policy.cost_critic.parameters(), config["max_grad_norm"])
                     cost_critic_optimizer.step()
-
-                    # Compute losses for logging
-                    with torch.no_grad():
-                        value_r = policy.reward_critic(obs_b, risk_b)
-                        value_c = policy.cost_critic(obs_b, risk_b)
-                        loss_r = nn.functional.mse_loss(value_r, target_value_r_b)
-                        loss_c = nn.functional.mse_loss(value_c, target_value_c_b)
                 else:
-                    risk_b = risk_b if args.use_risk else None
-                    reward_critic_optimizer.zero_grad()
-                    loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
-                    cost_critic_optimizer.zero_grad()
+                    # Standard cost critic update
                     loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk_b), target_value_c_b)
                     if config.get("use_critic_norm", True):
-                        for param in policy.reward_critic.parameters():
-                            loss_r += param.pow(2).sum() * 0.001
                         for param in policy.cost_critic.parameters():
                             loss_c += param.pow(2).sum() * 0.001
-                    total_loss = 2*loss_r + loss_c \
-                        if config.get("use_value_coefficient", False) \
-                        else loss_r + loss_c
-                    total_loss.backward()
-                    clip_grad_norm_(policy.parameters(), config["max_grad_norm"])
-                    reward_critic_optimizer.step()
+                    loss_c.backward()
+                    clip_grad_norm_(policy.cost_critic.parameters(), config["max_grad_norm"])
                     cost_critic_optimizer.step()
+
+                # Compute losses for logging (always compute for logging purposes)
+                with torch.no_grad():
+                    value_r = policy.reward_critic(obs_b, risk_b)
+                    value_c = policy.cost_critic(obs_b, risk_b)
+                    loss_r = nn.functional.mse_loss(value_r, target_value_r_b)
+                    loss_c = nn.functional.mse_loss(value_c, target_value_c_b)
+                
                 logger.store(
                     **{
                         "Loss/Loss_reward_critic": loss_r.mean().item(),

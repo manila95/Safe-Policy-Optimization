@@ -446,7 +446,7 @@ def main(args, cfg_env=None):
                         last_value_r=last_value_r, last_value_c=last_value_c, idx=idx
                     )
         rollout_end_time = time.time()
-        if epoch % 20 == 0:
+        if epoch % 20 == 0 and args.eval_critic_performance:
             # Evaluate critic performance using fresh rollouts
             critic_metrics = evaluate_critic_performance_from_rollouts(
                 args=args,
@@ -855,7 +855,7 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/AcceptanceStep")
             logger.log_tabular("Metrics/ViolationRate")
             logger.log_tabular("Metrics/TotalViolation")
-            if epoch % 20 == 0:
+            if epoch % 20 == 0 and args.eval_critic_performance:
                 # Add critic evaluation metrics
                 logger.log_tabular("Reward Value/EstimationError")
                 logger.log_tabular("Reward Value/MeanAbsError") 
@@ -918,8 +918,8 @@ def main(args, cfg_env=None):
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
     import wandb
-    run = wandb.init(config=vars(args), entity="kaustubh95",
-                project="conservatism_in_rl",
+    run = wandb.init(config=vars(args), entity="liam-paull",
+                project="sam-safe-rl",
                 settings=wandb.Settings(_service_wait=60),
                 # monitor_gym=True,
                 sync_tensorboard=True, save_code=True)

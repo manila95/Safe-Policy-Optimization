@@ -43,6 +43,8 @@ from safepo.common.model import ActorVCritic, RiskEst
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
 from safepo.utils.risk import *
 from safepo.single_agent.utils import *
+from safepo.single_agent.sam import *
+
 
 STEP_FRACTION=0.8
 CPO_SEARCHING_STEPS=15
@@ -500,31 +502,48 @@ def main(args, cfg_env=None):
         policy.actor.zero_grad()
 
         # compute loss_pi
-        temp_distribution = policy.actor(data["obs"], data["risk"])
-        log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
-        ratio = torch.exp(log_prob - data["log_prob"])
-        loss_pi_r = -(ratio * data["adv_r"]).mean()
-        loss_reward_before = loss_pi_r.item()
-        old_distribution = policy.actor(data["obs"], data["risk"])
-        loss_pi_r.backward()
+        if args.use_sam_actor:
+            # Reward gradient
+            sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad = compute_sam_gradients_v1(fvp, policy, data, data["adv_r"], data["adv_c"], data["adv_r"], rho=args.sam_rho, target_kl=args.perturbation_target_kl, num_samples=args.sam_num_samples)
+            grads = -sam_grads
+            x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, grads, CONJUGATE_GRADIENT_ITERS)
+            assert torch.isfinite(x).all(), "x is not finite"
+            xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
+            assert xHx.item() >= 0, "xHx is negative"
+            alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
 
-        grads = -get_flat_gradients_from(policy.actor)
-        x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, grads, CONJUGATE_GRADIENT_ITERS)
-        assert torch.isfinite(x).all(), "x is not finite"
-        xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
-        assert xHx.item() >= 0, "xHx is negative"
-        alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
+            # Cost gradient
+            policy.actor.zero_grad()
+            b_sam_grads, b_perturbed_params, b_cos_sim, b_effective_rho, b_scale_along_grad = compute_sam_gradients_v1(fvp, policy, data, -data["adv_c"], data["adv_c"], data["adv_r"], rho=args.sam_rho, target_kl=args.perturbation_target_kl, num_samples=args.sam_num_samples)
+            b_grads = b_sam_grads
 
-        policy.actor.zero_grad()
-        temp_distribution = policy.actor(data["obs"], data["risk"])
-        log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
-        ratio = torch.exp(log_prob - data["log_prob"])
-        loss_pi_c = (ratio * data["adv_c"]).mean()
-        loss_cost_before = loss_pi_c.item()
+        else:
+            temp_distribution = policy.actor(data["obs"], data["risk"])
+            log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+            ratio = torch.exp(log_prob - data["log_prob"])
+            loss_pi_r = -(ratio * data["adv_r"]).mean()
+            loss_reward_before = loss_pi_r.item()
+            old_distribution = policy.actor(data["obs"], data["risk"])
+            loss_pi_r.backward()
 
-        loss_pi_c.backward()
+            grads = -get_flat_gradients_from(policy.actor)
+            x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, grads, CONJUGATE_GRADIENT_ITERS)
+            assert torch.isfinite(x).all(), "x is not finite"
+            xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
+            assert xHx.item() >= 0, "xHx is negative"
+            alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
 
-        b_grads = get_flat_gradients_from(policy.actor)
+            policy.actor.zero_grad()
+            temp_distribution = policy.actor(data["obs"], data["risk"])
+            log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+            ratio = torch.exp(log_prob - data["log_prob"])
+            loss_pi_c = (ratio * data["adv_c"]).mean()
+            loss_cost_before = loss_pi_c.item()
+
+            loss_pi_c.backward()
+
+            b_grads = get_flat_gradients_from(policy.actor)
+        
         ep_costs = logger.get_stats("Metrics/EpCost") - args.cost_limit
 
         p = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, b_grads, CONJUGATE_GRADIENT_ITERS)

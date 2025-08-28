@@ -9,6 +9,28 @@ import numpy as np
 from safepo.common.model import ActorVCritic
 
 
+
+def actor_sam_fn(args):
+    if args.sam_type == "v1":
+        if args.use_kl:
+            return compute_sam_gradients_v1_kl
+        else:
+            return compute_sam_gradients_v1
+    elif args.sam_type == "v2":
+        if args.use_kl:
+            return compute_sam_gradients_v2_kl
+        else:
+            return compute_sam_gradients_v2
+    elif args.sam_type == "v3":
+        if args.use_kl:
+            return compute_sam_gradients_v3_kl
+        else:
+            return compute_sam_gradients_v3
+    elif args.sam_type == "v4":
+        return compute_sam_gradients_v4
+    else:
+        raise ValueError(f"Invalid SAM type: {args.sam_type}")
+
 def get_flat_params_from(model: torch.nn.Module) -> torch.Tensor:
     flat_params = []
     for _, param in model.named_parameters():

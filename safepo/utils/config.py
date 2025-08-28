@@ -203,6 +203,8 @@ def single_agent_args():
         {"name": "--record-gif", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to record GIF"},
         {"name": "--sam-num-samples", "type": int, "default": 10, "help": "Number of samples for SAM"},
         {"name": "--eval-critic-performance", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to evaluate critic performance"},
+        {"name": "--use-sam-actor-reward", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use SAM for actor reward update"},
+        {"name": "--use-sam-actor-cost", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use SAM for actor cost update"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

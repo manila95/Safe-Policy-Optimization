@@ -503,34 +503,34 @@ def main(args, cfg_env=None):
         theta_old = get_flat_params_from(policy.actor)
         policy.actor.zero_grad()
 
+        with torch.no_grad():
+            temp_distribution = policy.actor(data["obs"], data["risk"])
+            log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+            ratio = torch.exp(log_prob - data["log_prob"])
+            loss_pi_r = -(ratio * data["adv_r"]).mean()
+            loss_pi_c = -(ratio * data["adv_c"]).mean()
+            loss_cost_before = loss_pi_c.item()
+            loss_reward_before = loss_pi_r.item()
+
         # compute loss_pi
-        if args.use_sam_actor:
-            with torch.no_grad():
-                temp_distribution = policy.actor(data["obs"], data["risk"])
-                log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
-                ratio = torch.exp(log_prob - data["log_prob"])
-                loss_pi_r = -(ratio * data["adv_r"]).mean()
-                loss_pi_c = -(ratio * data["adv_c"]).mean()
+        if args.use_sam_actor_reward:
 
             old_distribution = policy.actor(data["obs"], data["risk"])
-            loss_reward_before = loss_pi_r.item()
-            loss_cost_before = loss_pi_c.item()
-
             # Reward gradient
-            sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad = compute_sam_gradients_v1(fvp, policy, data, data["adv_r"], data["adv_c"], data["adv_r"], rho=args.sam_rho, target_kl=args.perturbation_target_kl, num_samples=args.sam_num_samples)
+            sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad = actor_sam_fn(args)(
+                fvp, policy, data, data["adv_r"], data["adv_c"], data["adv_r"],
+                rho=args.sam_rho, 
+                target_kl=args.perturbation_target_kl,
+                num_samples=args.sam_num_samples,
+            )
             grads = -sam_grads
             x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, grads, CONJUGATE_GRADIENT_ITERS)
             assert torch.isfinite(x).all(), "x is not finite"
             xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
             assert xHx.item() >= 0, "xHx is negative"
             alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
-
-            # Cost gradient
-            policy.actor.zero_grad()
-            b_sam_grads, b_perturbed_params, b_cos_sim, b_effective_rho, b_scale_along_grad = compute_sam_gradients_v1(fvp, policy, data, -data["adv_c"], data["adv_c"], data["adv_r"], rho=args.sam_rho, target_kl=args.perturbation_target_kl, num_samples=args.sam_num_samples)
-            b_grads = b_sam_grads
-
         else:
+
             temp_distribution = policy.actor(data["obs"], data["risk"])
             log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
             ratio = torch.exp(log_prob - data["log_prob"])
@@ -546,6 +546,19 @@ def main(args, cfg_env=None):
             assert xHx.item() >= 0, "xHx is negative"
             alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
 
+
+        if args.use_sam_actor_cost:
+            # Cost gradient
+            policy.actor.zero_grad()
+            b_sam_grads, b_perturbed_params, b_cos_sim, b_effective_rho, b_scale_along_grad = actor_sam_fn(args)(
+                fvp, policy, data, -data["adv_c"], data["adv_c"], data["adv_r"],
+                rho=args.sam_rho, 
+                target_kl=args.perturbation_target_kl,
+                num_samples=args.sam_num_samples,
+            )
+            b_grads = b_sam_grads
+
+        else:
             policy.actor.zero_grad()
             temp_distribution = policy.actor(data["obs"], data["risk"])
             log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
@@ -913,10 +926,10 @@ def main(args, cfg_env=None):
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
     import wandb
-    run = wandb.init(config=vars(args), entity="kaustubh95",
-                project="conservatism_in_rl",
+    run = wandb.init(config=vars(args), entity="liam-paull",
+                project="sam-safe-rl",
                 monitor_gym=True,
-                dir=os.path.join(args.log_dir, args.experiment),
+                # dir=os.path.join(args.log_dir, args.experiment),
                 sync_tensorboard=True, save_code=True)
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])

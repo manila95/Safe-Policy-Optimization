@@ -73,26 +73,6 @@ isaac_gym_specific_cfg = {
 }
 
 
-def actor_sam_fn(args):
-    if args.sam_type == "v1":
-        if args.use_kl:
-            return compute_sam_gradients_v1_kl
-        else:
-            return compute_sam_gradients_v1
-    elif args.sam_type == "v2":
-        if args.use_kl:
-            return compute_sam_gradients_v2_kl
-        else:
-            return compute_sam_gradients_v2
-    elif args.sam_type == "v3":
-        if args.use_kl:
-            return compute_sam_gradients_v3_kl
-        else:
-            return compute_sam_gradients_v3
-    elif args.sam_type == "v4":
-        return compute_sam_gradients_v4
-    else:
-        raise ValueError(f"Invalid SAM type: {args.sam_type}")
 
 def render_and_save_gif(env, policy, device, max_steps=2000, use_risk=False, risk_model=None, gif_name="episode", wandb_log=True):
     """

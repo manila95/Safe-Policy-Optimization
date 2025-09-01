@@ -35,7 +35,7 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
+from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
 from safepo.common.lagrange import Lagrange
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
@@ -158,6 +158,15 @@ def fvp(
     return flat_grad_grad_kl + params * 0.1
 
 
+def env_fn(env_id):
+    if "Safety" in env_id:
+        return make_sa_safetygym_env
+    else:
+        return make_sa_gymrobot_env
+
+
+
+
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
     random.seed(args.seed)
@@ -169,21 +178,20 @@ def main(args, cfg_env=None):
 
 
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
-            num_envs=args.num_envs, env_id=args.task, seed=args.seed
+        env, obs_space, act_space = env_fn(args.task)(
+            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        eval_env, _, _ = make_sa_mujoco_env(num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = env_fn(args.task)(args, num_envs=1, env_id=args.task, seed=None)
         config = default_cfg
 
     else:
-        sim_params = parse_sim_params(args, cfg_env, None)
-        env = make_sa_isaac_env(args=args, cfg=cfg_env, sim_params=sim_params)
+        sim_params = parse_sim_params(cfg_env, None)
+        env = make_sa_isaac_env(cfg=cfg_env, sim_params=sim_params)
         eval_env = env
         obs_space = env.observation_space
         act_space = env.action_space
         args.num_envs = env.num_envs
         config = isaac_gym_specific_cfg
-
     # set training steps
     steps_per_epoch = config.get("steps_per_epoch", args.steps_per_epoch)
     total_steps = config.get("total_steps", args.total_steps)
@@ -490,6 +498,12 @@ def main(args, cfg_env=None):
 
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
+    import wandb
+    run = wandb.init(config=vars(args), entity="liam-paull",
+                project="sam-safe-rl",
+                settings=wandb.Settings(_service_wait=60),
+                # monitor_gym=True,
+                sync_tensorboard=True, save_code=True)
     relpath = time.strftime("%Y-%m-%d-%H-%M-%S")
     subfolder = "-".join(["seed", str(args.seed).zfill(3)])
     relpath = "-".join([subfolder, relpath])

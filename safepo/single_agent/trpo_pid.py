@@ -35,6 +35,8 @@ import torch.nn as nn
 import torch.optim
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
+import matplotlib.pyplot as plt
+
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
 from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
@@ -43,6 +45,12 @@ from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
 from safepo.single_agent.utils import *
+from safepo.single_agent.sam_utils import (
+    create_likelihood_ratio_scatter_plots,
+    create_sam_vs_standard_comparison_plots,
+    create_likelihood_ratio_difference_correlation_plots,
+    compute_correlation_metrics
+)
 from sam import *
 
 CONJUGATE_GRADIENT_ITERS=15
@@ -571,6 +579,28 @@ def main(args, cfg_env=None):
                 log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
                 ratio = torch.exp(log_prob - data["log_prob"])
                 loss_before = -(ratio * advantage).mean().item()
+                
+                # Store pre-update ratios for plotting
+                pre_update_ratios = ratio.clone()
+                
+                # Log pre-update likelihood ratio statistics (should be ~1.0)
+                logger.store(
+                    **{
+                        "LikelihoodRatio/PreUpdate_Mean": ratio.mean().item(),
+                        "LikelihoodRatio/PreUpdate_Std": ratio.std().item(),
+                        "LikelihoodRatio/PreUpdate_Min": ratio.min().item(),
+                        "LikelihoodRatio/PreUpdate_Max": ratio.max().item(),
+                    }
+                )
+            
+            # Compute standard TRPO gradients for comparison
+            temp_distribution_std = policy.actor(data["obs"], data["risk"])
+            log_prob_std = temp_distribution_std.log_prob(data["act"]).sum(dim=-1)
+            ratio_std = torch.exp(log_prob_std - data["log_prob"])
+            loss_pi_std = -(ratio_std * advantage).mean()
+            loss_pi_std.backward()
+            standard_grads = -get_flat_gradients_from(policy.actor)
+            policy.actor.zero_grad()  # Clear gradients for SAM computation
             
             # Get SAM gradients at perturbed point
             sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad = actor_sam_fn(args)(
@@ -579,6 +609,13 @@ def main(args, cfg_env=None):
                 target_kl=args.perturbation_target_kl,
                 num_samples=args.sam_num_samples,
             )
+            
+            # Compute standard TRPO step direction for comparison
+            x_std = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, standard_grads, CONJUGATE_GRADIENT_ITERS)
+            xHx_std = torch.dot(x_std, fvp(x_std, policy, fvp_obs, fvp_risk))
+            alpha_std = torch.sqrt(2 * config['target_kl'] / (xHx_std + 1e-8))
+            step_direction_std = x_std * alpha_std
+            
             # Use SAM gradients for TRPO update
             x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, -sam_grads, CONJUGATE_GRADIENT_ITERS)
             assert torch.isfinite(x).all(), "x is not finite"
@@ -588,6 +625,9 @@ def main(args, cfg_env=None):
             step_direction = x * alpha
             assert torch.isfinite(step_direction).all(), "step_direction is not finite"
             grads = -sam_grads
+            
+            # Store standard step direction for comparison
+            standard_step_direction = step_direction_std.clone()
 
         else:
             temp_distribution = policy.actor(data["obs"], data["risk"])
@@ -596,6 +636,19 @@ def main(args, cfg_env=None):
             loss_pi = -(ratio * advantage).mean()
             loss_before = loss_pi.item()
             old_distribution = policy.actor(data["obs"], data["risk"])
+            
+            # Store pre-update ratios for plotting
+            pre_update_ratios = ratio.clone()
+            
+            # Log pre-update likelihood ratio statistics (should be ~1.0)
+            logger.store(
+                **{
+                    "LikelihoodRatio/PreUpdate_Mean": ratio.mean().item(),
+                    "LikelihoodRatio/PreUpdate_Std": ratio.std().item(),
+                    "LikelihoodRatio/PreUpdate_Min": ratio.min().item(),
+                    "LikelihoodRatio/PreUpdate_Max": ratio.max().item(),
+                }
+            )
 
             loss_pi.backward()
 
@@ -661,6 +714,158 @@ def main(args, cfg_env=None):
 
         theta_new = theta_old + step_frac * step_direction
         set_param_values_to_model(policy.actor, theta_new)
+
+        # Log post-update likelihood ratio statistics
+        with torch.no_grad():
+            final_distribution = policy.actor(data["obs"], data["risk"])
+            final_log_prob = final_distribution.log_prob(data["act"]).sum(dim=-1)
+            final_ratio = torch.exp(final_log_prob - data["log_prob"])
+            
+            logger.store(
+                **{
+                    "LikelihoodRatio/PostUpdate_Mean": final_ratio.mean().item(),
+                    "LikelihoodRatio/PostUpdate_Std": final_ratio.std().item(),
+                    "LikelihoodRatio/PostUpdate_Min": final_ratio.min().item(),
+                    "LikelihoodRatio/PostUpdate_Max": final_ratio.max().item(),
+                }
+            )
+            
+            # Create scatter plots for likelihood ratios vs advantages (every 10 epochs)
+            if epoch % 10 == 0:
+                # Create scatter plots using stored pre-update ratios
+                scatter_plots = create_likelihood_ratio_scatter_plots(
+                    pre_update_ratios, final_ratio, data["adv_r"], data["adv_c"], advantage, epoch
+                )
+                
+                # Log plots to wandb
+                for plot_name, fig in scatter_plots.items():
+                    plot_img = wandb.Image(fig)
+                    wandb.log({f"plots/likelihood_ratios_{plot_name}": plot_img})
+                    plt.close(fig)  # Close figure to free memory
+                
+                # If using SAM actor, create comparison plots with standard TRPO
+                if args.use_sam_actor:
+                    # Compute what the standard TRPO update would have produced with proper KL constraints
+                    with torch.no_grad():
+                        # Apply the same line search process for standard TRPO
+                        standard_step_frac = 1.0
+                        standard_theta_new = theta_old
+                        
+                        # Line search for standard TRPO (same as SAM but with standard gradients)
+                        for step in range(TRPO_SEARCHING_STEPS):
+                            # update theta params
+                            new_theta_std = theta_old + standard_step_frac * standard_step_direction
+                            # set new params as params of net
+                            set_param_values_to_model(policy.actor, new_theta_std)
+
+                            with torch.no_grad():
+                                temp_distribution_std = policy.actor(data["obs"], data["risk"])
+                                log_prob_std = temp_distribution_std.log_prob(data["act"]).sum(dim=-1)
+                                ratio_std = torch.exp(log_prob_std - data["log_prob"])
+                                loss_pi_std = -(ratio_std * advantage).mean()
+                                
+                                # compute KL distance between new and old policy
+                                current_distribution_std = policy.actor(data["obs"], data["risk"])
+                                kl_std = (
+                                    torch.distributions.kl.kl_divergence(
+                                        old_distribution, current_distribution_std
+                                    )
+                                    .mean()
+                                    .item()
+                                )
+                            
+                            # Check KL constraint
+                            if not torch.isfinite(loss_pi_std):
+                                logger.log("WARNING: standard loss_pi not finite")
+                            elif kl_std > config["target_kl"]:
+                                logger.log("INFO: standard violated KL constraint.")
+                            else:
+                                # step only if within trust region
+                                standard_theta_new = new_theta_std
+                                break
+                            standard_step_frac *= 0.8
+                        
+                        # Apply the final standard update
+                        set_param_values_to_model(policy.actor, standard_theta_new)
+                        
+                        # Compute standard post-update ratios
+                        standard_distribution = policy.actor(data["obs"], data["risk"])
+                        standard_log_prob = standard_distribution.log_prob(data["act"]).sum(dim=-1)
+                        standard_post_ratios = torch.exp(standard_log_prob - data["log_prob"])
+                        
+                        # Restore SAM policy
+                        set_param_values_to_model(policy.actor, theta_new)
+                    
+                    # Log comparison metrics
+                    ratio_diff = final_ratio - standard_post_ratios
+                    
+                    # Compute policy change differences
+                    sam_policy_change = final_ratio - pre_update_ratios
+                    standard_policy_change = standard_post_ratios - pre_update_ratios
+                    policy_change_diff = sam_policy_change - standard_policy_change
+                    
+                    # Create comparison plots
+                    comparison_plots = create_sam_vs_standard_comparison_plots(
+                        pre_update_ratios, final_ratio, standard_post_ratios, 
+                        data["adv_r"], data["adv_c"], advantage, epoch
+                    )
+                    
+                    # Log comparison plots to wandb
+                    for plot_name, fig in comparison_plots.items():
+                        plot_img = wandb.Image(fig)
+                        wandb.log({f"plots/sam_comparison_{plot_name}": plot_img})
+                        plt.close(fig)  # Close figure to free memory
+                    
+                    # Create and log correlation plots with separate naming
+                    correlation_plots = create_likelihood_ratio_difference_correlation_plots(
+                        final_ratio, standard_post_ratios, 
+                        data["adv_r"], data["adv_c"], advantage, epoch, data['log_prob']
+                    )
+                    
+                    # Log correlation plots to wandb with distinct naming
+                    for plot_name, fig in correlation_plots.items():
+                        plot_img = wandb.Image(fig)
+                        wandb.log({f"plots/correlation_analysis_{plot_name}": plot_img})
+                        plt.close(fig)  # Close figure to free memory
+                    
+                    # Compute and log correlation metrics to separate SAM-Std Correlation panel
+                    correlation_metrics = compute_correlation_metrics(
+                        final_ratio, standard_post_ratios, 
+                        data["adv_r"], data["adv_c"], advantage
+                    )
+                    
+                    # Log correlation metrics to wandb under SAM-Std Correlation panel
+                    wandb.log(correlation_metrics)
+                    
+                    # Store correlation metrics for tabular logging
+                    logger.store(**correlation_metrics)
+                    
+
+                    logger.store(
+                        **{
+                            "SAM_Comparison/Standard_PostUpdate_Mean": standard_post_ratios.mean().item(),
+                            "SAM_Comparison/Standard_PostUpdate_Std": standard_post_ratios.std().item(),
+                            "SAM_Comparison/Standard_PostUpdate_Min": standard_post_ratios.min().item(),
+                            "SAM_Comparison/Standard_PostUpdate_Max": standard_post_ratios.max().item(),
+                            "SAM_Comparison/Ratio_Difference_Mean": ratio_diff.mean().item(),
+                            "SAM_Comparison/Ratio_Difference_Std": ratio_diff.std().item(),
+                            "SAM_Comparison/Ratio_Difference_Min": ratio_diff.min().item(),
+                            "SAM_Comparison/Ratio_Difference_Max": ratio_diff.max().item(),
+                            "SAM_Comparison/SAM_Larger_Ratio": (ratio_diff > 0).float().mean().item(),
+                            "SAM_Comparison/Standard_StepFraction": standard_step_frac,
+                            "SAM_Comparison/SAM_StepFraction": step_frac,
+                            "SAM_Comparison/StepFraction_Difference": step_frac - standard_step_frac,
+                            "SAM_Comparison/SAM_PolicyChange_Mean": sam_policy_change.mean().item(),
+                            "SAM_Comparison/SAM_PolicyChange_Std": sam_policy_change.std().item(),
+                            "SAM_Comparison/Standard_PolicyChange_Mean": standard_policy_change.mean().item(),
+                            "SAM_Comparison/Standard_PolicyChange_Std": standard_policy_change.std().item(),
+                            "SAM_Comparison/PolicyChange_Difference_Mean": policy_change_diff.mean().item(),
+                            "SAM_Comparison/PolicyChange_Difference_Std": policy_change_diff.std().item(),
+                            "SAM_Comparison/PolicyChange_Difference_Min": policy_change_diff.min().item(),
+                            "SAM_Comparison/PolicyChange_Difference_Max": policy_change_diff.max().item(),
+                            "SAM_Comparison/SAM_Larger_PolicyChange": (policy_change_diff > 0).float().mean().item(),
+                        }
+                    )
 
         logger.store(
             **{
@@ -835,6 +1040,72 @@ def main(args, cfg_env=None):
             logger.log_tabular("Misc/AcceptanceStep")
             logger.log_tabular("Metrics/ViolationRate")
             logger.log_tabular("Metrics/TotalViolation")
+            
+            # Log likelihood ratio statistics
+            logger.log_tabular("LikelihoodRatio/PreUpdate_Mean")
+            logger.log_tabular("LikelihoodRatio/PreUpdate_Std")
+            logger.log_tabular("LikelihoodRatio/PreUpdate_Min")
+            logger.log_tabular("LikelihoodRatio/PreUpdate_Max")
+            logger.log_tabular("LikelihoodRatio/PostUpdate_Mean")
+            logger.log_tabular("LikelihoodRatio/PostUpdate_Std")
+            logger.log_tabular("LikelihoodRatio/PostUpdate_Min")
+            logger.log_tabular("LikelihoodRatio/PostUpdate_Max")
+            
+            # Log SAM comparison metrics if using SAM actor
+            if args.use_sam_actor:
+                logger.log_tabular("SAM_Comparison/Standard_PostUpdate_Mean")
+                logger.log_tabular("SAM_Comparison/Standard_PostUpdate_Std")
+                logger.log_tabular("SAM_Comparison/Standard_PostUpdate_Min")
+                logger.log_tabular("SAM_Comparison/Standard_PostUpdate_Max")
+                logger.log_tabular("SAM_Comparison/Ratio_Difference_Mean")
+                logger.log_tabular("SAM_Comparison/Ratio_Difference_Std")
+                logger.log_tabular("SAM_Comparison/Ratio_Difference_Min")
+                logger.log_tabular("SAM_Comparison/Ratio_Difference_Max")
+                logger.log_tabular("SAM_Comparison/SAM_Larger_Ratio")
+                logger.log_tabular("SAM_Comparison/Standard_StepFraction")
+                logger.log_tabular("SAM_Comparison/SAM_StepFraction")
+                logger.log_tabular("SAM_Comparison/StepFraction_Difference")
+                logger.log_tabular("SAM_Comparison/SAM_PolicyChange_Mean")
+                logger.log_tabular("SAM_Comparison/SAM_PolicyChange_Std")
+                logger.log_tabular("SAM_Comparison/Standard_PolicyChange_Mean")
+                logger.log_tabular("SAM_Comparison/Standard_PolicyChange_Std")
+                logger.log_tabular("SAM_Comparison/PolicyChange_Difference_Mean")
+                logger.log_tabular("SAM_Comparison/PolicyChange_Difference_Std")
+                logger.log_tabular("SAM_Comparison/PolicyChange_Difference_Min")
+                logger.log_tabular("SAM_Comparison/PolicyChange_Difference_Max")
+                logger.log_tabular("SAM_Comparison/SAM_Larger_PolicyChange")
+                
+                # Log SAM-Std Correlation metrics
+                logger.log_tabular("SAM_Std_Correlation/RewardAdv_Pearson_r")
+                logger.log_tabular("SAM_Std_Correlation/RewardAdv_Pearson_p")
+                logger.log_tabular("SAM_Std_Correlation/RewardAdv_Spearman_r")
+                logger.log_tabular("SAM_Std_Correlation/RewardAdv_Spearman_p")
+                logger.log_tabular("SAM_Std_Correlation/RewardAdv_Significant")
+                logger.log_tabular("SAM_Std_Correlation/CostAdv_Pearson_r")
+                logger.log_tabular("SAM_Std_Correlation/CostAdv_Pearson_p")
+                logger.log_tabular("SAM_Std_Correlation/CostAdv_Spearman_r")
+                logger.log_tabular("SAM_Std_Correlation/CostAdv_Spearman_p")
+                logger.log_tabular("SAM_Std_Correlation/CostAdv_Significant")
+                logger.log_tabular("SAM_Std_Correlation/LagrangianAdv_Pearson_r")
+                logger.log_tabular("SAM_Std_Correlation/LagrangianAdv_Pearson_p")
+                logger.log_tabular("SAM_Std_Correlation/LagrangianAdv_Spearman_r")
+                logger.log_tabular("SAM_Std_Correlation/LagrangianAdv_Spearman_p")
+                logger.log_tabular("SAM_Std_Correlation/LagrangianAdv_Significant")
+                logger.log_tabular("SAM_Std_Correlation/RatioDiff_Mean")
+                logger.log_tabular("SAM_Std_Correlation/RatioDiff_Std")
+                logger.log_tabular("SAM_Std_Correlation/RatioDiff_Min")
+                logger.log_tabular("SAM_Std_Correlation/RatioDiff_Max")
+                logger.log_tabular("SAM_Std_Correlation/RatioDiff_AbsMean")
+                logger.log_tabular("SAM_Std_Correlation/SAM_Larger_Count")
+                logger.log_tabular("SAM_Std_Correlation/Standard_Larger_Count")
+                logger.log_tabular("SAM_Std_Correlation/Equal_Count")
+                logger.log_tabular("SAM_Std_Correlation/SAM_Larger_Percentage")
+                logger.log_tabular("SAM_Std_Correlation/RewardAdv_Mean")
+                logger.log_tabular("SAM_Std_Correlation/RewardAdv_Std")
+                logger.log_tabular("SAM_Std_Correlation/CostAdv_Mean")
+                logger.log_tabular("SAM_Std_Correlation/CostAdv_Std")
+                logger.log_tabular("SAM_Std_Correlation/LagrangianAdv_Mean")
+                logger.log_tabular("SAM_Std_Correlation/LagrangianAdv_Std")
             if epoch % 20 == 0 and args.eval_critic_performance:
                 # Add critic evaluation metrics
                 logger.log_tabular("Reward Value/EstimationError")

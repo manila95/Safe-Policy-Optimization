@@ -498,6 +498,8 @@ def main(args, cfg_env=None):
             data["risk"] = risk_train.model(data["obs"]) if args.use_risk else None
         fvp_obs = data["obs"][:: 1]
         fvp_risk = data["risk"][:: 1] if args.use_risk else None
+        data["fvp_obs"] = fvp_obs
+        data["fvp_risk"] = fvp_risk
 
         
         theta_old = get_flat_params_from(policy.actor)

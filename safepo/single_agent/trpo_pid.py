@@ -211,13 +211,20 @@ def main(args, cfg_env=None):
         hidden_sizes=config["hidden_sizes"],
         use_risk=args.use_risk,
         risk_size=risk_size,
+        num_critics=args.num_critics,
     ).to(device)
-    reward_critic_optimizer = torch.optim.Adam(
-        policy.reward_critic.parameters(), lr=1e-3
-    )
-    cost_critic_optimizer = torch.optim.Adam(
-        policy.cost_critic.parameters(), lr=1e-3
-    )
+    reward_critic_optimizers = []
+    
+    for i in range(args.num_critics):
+        reward_critic_optimizers.append(torch.optim.Adam(
+            policy.reward_critics[i].parameters(), lr=1e-3
+        ))
+    cost_critic_optimizers = []
+    for i in range(args.num_critics):
+        cost_critic_optimizers.append(torch.optim.Adam(
+            policy.cost_critics[i].parameters(), lr=1e-3
+        ))
+
 
     if args.use_risk:
         risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
@@ -250,6 +257,7 @@ def main(args, cfg_env=None):
         device=device,
         num_envs=args.num_envs,
         gamma=config["gamma"],
+        num_critics=args.num_critics,
     )
     # setup lagrangian multiplier
     lagrange = Lagrange(
@@ -302,7 +310,6 @@ def main(args, cfg_env=None):
 
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
-
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
@@ -394,6 +401,12 @@ def main(args, cfg_env=None):
                                 "Metrics/EpRet": np.mean(rew_deque),
                                 "Metrics/EpCost": np.mean(cost_deque),
                                 "Metrics/EpLen": np.mean(len_deque),
+                                "Metrics/EpCostStd": np.std(cost_deque),
+                                "Metrics/EpCostMin": np.min(cost_deque),
+                                "Metrics/EpCostMax": np.max(cost_deque),
+                                "Metrics/EpRetStd": np.std(rew_deque),
+                                "Metrics/EpRetMin": np.min(rew_deque),
+                                "Metrics/EpRetMax": np.max(rew_deque),
                                 #"Metrics/EpGoal": np.mean(goal_deque),
                                 "Metrics/TotalCost": total_cost,
                                 "Metrics/ViolationRate": np.mean(np.array(cost_deque) > args.cost_limit),
@@ -464,9 +477,20 @@ def main(args, cfg_env=None):
         policy.actor.zero_grad()
 
         # comnpute advantage
-        advantage = data["adv_r"] - lagrange.lagrangian_multiplier * data["adv_c"]
+        if args.no_reward_ensemble:
+            advantage = data["adv_r"][:, 0] - lagrange.lagrangian_multiplier * (data["adv_c"].mean(dim=1) + args.cost_beta * data["adv_c"].std(dim=1))
+        else:
+            advantage = data["adv_r"].mean(dim=1) - lagrange.lagrangian_multiplier * (data["adv_c"].mean(dim=1) + args.cost_beta * data["adv_c"].std(dim=1))
         advantage /= (lagrange.lagrangian_multiplier + 1)
 
+        logger.store(
+            **{
+                "Metrics/AdvR": advantage.mean().item(),
+                "Metrics/AdvC": data["adv_c"].mean().item(),
+                "Metrics/AdvCStd": data["adv_c"].std(dim=1).mean().item(),
+                "Metrics/AdvRStd": data["adv_r"].std(dim=1).mean().item(),
+            }
+        )
         # compute loss_pi
         temp_distribution = policy.actor(data["obs"], data["risk"])
         log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
@@ -570,22 +594,23 @@ def main(args, cfg_env=None):
                 target_value_c_b,
             ) in dataloader:
                 risk_b = risk_b if args.use_risk else None
-                reward_critic_optimizer.zero_grad()
-                loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
-                cost_critic_optimizer.zero_grad()
-                loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk_b), target_value_c_b)
-                if config.get("use_critic_norm", True):
-                    for param in policy.reward_critic.parameters():
-                        loss_r += param.pow(2).sum() * 0.001
-                    for param in policy.cost_critic.parameters():
-                        loss_c += param.pow(2).sum() * 0.001
-                total_loss = 2*loss_r + loss_c \
-                    if config.get("use_value_coefficient", False) \
-                    else loss_r + loss_c
-                total_loss.backward()
-                clip_grad_norm_(policy.parameters(), config["max_grad_norm"])
-                reward_critic_optimizer.step()
-                cost_critic_optimizer.step()
+                for i, (reward_critic_optimizer, cost_critic_optimizer) in enumerate(zip(reward_critic_optimizers, cost_critic_optimizers)):
+                    reward_critic_optimizer.zero_grad()
+                    loss_r = nn.functional.mse_loss(policy.reward_critics[i](obs_b, risk_b), target_value_r_b[:, i])
+                    cost_critic_optimizer.zero_grad()
+                    loss_c = nn.functional.mse_loss(policy.cost_critics[i](obs_b, risk_b), target_value_c_b[:, i])
+                    if config.get("use_critic_norm", True):
+                        for param in policy.reward_critics[i].parameters():
+                            loss_r += param.pow(2).sum() * 0.001
+                        for param in policy.cost_critics[i].parameters():
+                            loss_c += param.pow(2).sum() * 0.001
+                    total_loss = 2*loss_r + loss_c \
+                        if config.get("use_value_coefficient", False) \
+                        else loss_r + loss_c
+                    total_loss.backward()
+                    clip_grad_norm_(policy.parameters(), config["max_grad_norm"])
+                    reward_critic_optimizer.step()
+                    cost_critic_optimizer.step()
 
                 logger.store(
                     **{
@@ -608,6 +633,16 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpCost")
             logger.log_tabular("Metrics/TotalCost")
             logger.log_tabular("Metrics/EpLen")
+            logger.log_tabular("Metrics/EpCostStd")
+            logger.log_tabular("Metrics/EpCostMin")
+            logger.log_tabular("Metrics/EpCostMax")
+            logger.log_tabular("Metrics/EpRetStd")
+            logger.log_tabular("Metrics/EpRetMin")
+            logger.log_tabular("Metrics/EpRetMax")
+            logger.log_tabular("Metrics/AdvR")
+            logger.log_tabular("Metrics/AdvC")
+            logger.log_tabular("Metrics/AdvCStd")
+            logger.log_tabular("Metrics/AdvRStd")
             #logger.log_tabular("Metrics/EpGoal")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")

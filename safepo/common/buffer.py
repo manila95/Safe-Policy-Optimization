@@ -49,6 +49,7 @@ class VectorizedOnPolicyBuffer:
         standardized_adv_c: bool = True,
         device: torch.device = "cpu",
         num_envs: int = 1,
+        num_critics: int = 5,
     ) -> None:
         self.buffers: list[dict[str, torch.tensor]] = [
             {
@@ -61,12 +62,12 @@ class VectorizedOnPolicyBuffer:
                 "reward": torch.zeros(size, dtype=torch.float32, device=device),
                 "cost": torch.zeros(size, dtype=torch.float32, device=device),
                 "done": torch.zeros(size, dtype=torch.float32, device=device),
-                "value_r": torch.zeros(size, dtype=torch.float32, device=device),
-                "value_c": torch.zeros(size, dtype=torch.float32, device=device),
-                "adv_r": torch.zeros(size, dtype=torch.float32, device=device),
-                "adv_c": torch.zeros(size, dtype=torch.float32, device=device),
-                "target_value_r": torch.zeros(size, dtype=torch.float32, device=device),
-                "target_value_c": torch.zeros(size, dtype=torch.float32, device=device),
+                "value_r": torch.zeros(size, num_critics, dtype=torch.float32, device=device),
+                "value_c": torch.zeros(size, num_critics, dtype=torch.float32, device=device),
+                "adv_r": torch.zeros(size, num_critics, dtype=torch.float32, device=device),
+                "adv_c": torch.zeros(size, num_critics, dtype=torch.float32, device=device),
+                "target_value_r": torch.zeros(size, num_critics, dtype=torch.float32, device=device),
+                "target_value_c": torch.zeros(size, num_critics, dtype=torch.float32, device=device),
                 "log_prob": torch.zeros(size, dtype=torch.float32, device=device),
             }
             for _ in range(num_envs)
@@ -115,8 +116,8 @@ class VectorizedOnPolicyBuffer:
         path_slice = slice(self.path_start_idx_list[idx], self.ptr_list[idx])
         last_value_r = last_value_r.to(self._device)
         last_value_c = last_value_c.to(self._device)
-        rewards = torch.cat([self.buffers[idx]["reward"][path_slice], last_value_r])
-        costs = torch.cat([self.buffers[idx]["cost"][path_slice], last_value_c])
+        rewards = torch.cat([self.buffers[idx]["reward"][path_slice], last_value_r[:,0]])
+        costs = torch.cat([self.buffers[idx]["cost"][path_slice], last_value_c[:,0]])
         values_r = torch.cat([self.buffers[idx]["value_r"][path_slice], last_value_r])
         values_c = torch.cat([self.buffers[idx]["value_c"][path_slice], last_value_c])
 
@@ -151,9 +152,9 @@ class VectorizedOnPolicyBuffer:
             for k, v in buffer.items():
                 data_pre[k].append(v)
         data = {k: torch.cat(v, dim=0) for k, v in data_pre.items()}
-        adv_mean = data["adv_r"].mean()
-        adv_std = data["adv_r"].std()
-        cadv_mean = data["adv_c"].mean()
+        adv_mean = data["adv_r"].mean(dim=0)
+        adv_std = data["adv_r"].std(dim=0)
+        cadv_mean = data["adv_c"].mean(dim=0)
         if self._standardized_adv_r:
             data["adv_r"] = (data["adv_r"] - adv_mean) / (adv_std + 1e-8)
         if self._standardized_adv_c:
@@ -181,10 +182,10 @@ def discount_cumsum(vector_x: torch.Tensor, discount: float) -> torch.Tensor:
     """
     length = vector_x.shape[0]
     vector_x = vector_x.type(torch.float64)
-    cumsum = vector_x[-1]
+    cumsum = vector_x[-1, :]
     for idx in reversed(range(length - 1)):
-        cumsum = vector_x[idx] + discount * cumsum
-        vector_x[idx] = cumsum
+        cumsum = vector_x[idx, :] + discount * cumsum
+        vector_x[idx, :] = cumsum
     return vector_x
 
 
@@ -195,9 +196,12 @@ def calculate_adv_and_value_targets(
     gamma: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # GAE formula: A_t = \sum_{k=0}^{n-1} (lam*gamma)^k delta_{t+k}
-    deltas = rewards[:-1] + gamma * values[1:] - values[:-1]
+    # Repeat rewards num_critics times along the last dimension
+    rewards = rewards.unsqueeze(1).repeat(1, values.shape[-1])
+    # Calculate deltas using the expanded rewards
+    deltas = rewards[:-1, :] + gamma * values[1:, :] - values[:-1, :]
     adv = discount_cumsum(deltas, gamma * lam)
-    target_value = adv + values[:-1]
+    target_value = adv + values[:-1, :]
     return adv, target_value
 
 def _flatten(T, N, x):

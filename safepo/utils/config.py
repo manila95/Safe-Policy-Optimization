@@ -175,6 +175,9 @@ def single_agent_args():
         {"name": "--pid-kp", "type": float, "default": 0.1, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-ki", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
         {"name": "--pid-kd", "type": float, "default": 0.01, "help": "learning rate of lagrangian multiplier"},
+        {"name": "--num-critics", "type": int, "default": 5, "help": "number of critics"},
+        {"name": "--cost-beta", "type": float, "default": 0.0, "help": "cost beta"},
+        {"name": "--no-reward-ensemble", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Toggles headless mode"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

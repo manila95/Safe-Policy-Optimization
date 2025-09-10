@@ -142,8 +142,9 @@ class VCritic(nn.Module):
         value_estimate = critic(observation)
     """
 
-    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, seed=42):
         super().__init__()
+        torch.manual_seed(seed)
         self.use_risk = use_risk
         if self.use_risk:
             self.critic = build_risk_mlp_network([obs_dim]+hidden_sizes+[1], risk_size)
@@ -155,6 +156,9 @@ class VCritic(nn.Module):
             return torch.squeeze(self.critic(obs, risk), -1)
         else:
             return torch.squeeze(self.critic(obs), -1)
+
+
+
 
 
 class ActorVCritic(nn.Module):
@@ -177,11 +181,15 @@ class ActorVCritic(nn.Module):
         value_estimate = actor_critic.get_value(observation)
     """
 
-    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, num_critics=5):
         super().__init__()
         self.use_risk = use_risk
-        self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
-        self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+        self.reward_critics = []
+        for i, _ in enumerate(range(num_critics)):
+            self.reward_critics.append(VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, seed=i))
+        self.cost_critics = []
+        for i, _ in enumerate(range(num_critics)):
+            self.cost_critics.append(VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, seed=i))
         self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
 
     def get_value(self, obs, risk=None):
@@ -221,12 +229,21 @@ class ActorVCritic(nn.Module):
         else:
             action = dist.rsample()
         log_prob = dist.log_prob(action).sum(axis=-1)
-        if self.use_risk:
-            value_r = self.reward_critic(obs, risk)
-            value_c = self.cost_critic(obs, risk)
-        else:
-            value_r = self.reward_critic(obs)
-            value_c = self.cost_critic(obs)
+        value_r = []
+        value_c = []
+        for reward_critic, cost_critic in zip(self.reward_critics, self.cost_critics):
+            if self.use_risk:
+                value_r.append(reward_critic(obs, risk))
+                value_c.append(cost_critic(obs, risk))
+            else:
+                value_r.append(reward_critic(obs))
+                value_c.append(cost_critic(obs))
+        try:
+            value_r = torch.stack(value_r, dim=1)
+            value_c = torch.stack(value_c, dim=1)
+        except:
+            value_r = torch.stack(value_r, dim=0)
+            value_c = torch.stack(value_c, dim=0)
         return action, log_prob, value_r, value_c
 
 class MultiAgentActor(nn.Module):

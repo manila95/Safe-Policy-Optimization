@@ -178,6 +178,13 @@ def single_agent_args():
         {"name": "--num-critics", "type": int, "default": 5, "help": "number of critics"},
         {"name": "--cost-beta", "type": float, "default": 0.0, "help": "cost beta"},
         {"name": "--no-reward-ensemble", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Toggles headless mode"},
+        {"name": "--use-sam-actor", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Toggles use of SAM for actor update"},
+        {"name": "--sam-rho", "type": float, "default": 0.05, "help": "rho for SAM"},
+        {"name": "--sam-num-samples", "type": int, "default": 10, "help": "number of samples for SAM"},
+        {"name": "--perturbation-target-kl", "type": float, "default": 0.01, "help": "target KL for perturbation"},
+        {"name": "--max-search-steps", "type": int, "default": 10, "help": "max search steps for perturbation"},
+        {"name": "--sam-type", "type": str, "default": "v1", "help": "type of SAM"},
+        {"name": "--use-kl", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Toggles use of KL for perturbation"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

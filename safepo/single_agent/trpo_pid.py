@@ -42,6 +42,7 @@ from safepo.common.lagrange import PIDLagrangian as Lagrange
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
+from safepo.single_agent.sam import *
 # from src.models.risk_models import *
 # from src.datasets.risk_datasets import *
 # from src.utils import * 
@@ -473,6 +474,8 @@ def main(args, cfg_env=None):
             data["risk"] = risk_model(data["obs"]) if args.use_risk else None
         fvp_obs = data["obs"][:: 1]
         fvp_risk = data["risk"][:: 1] if args.use_risk else None
+        data["fvp_obs"] = fvp_obs
+        data["fvp_risk"] = fvp_risk
         theta_old = get_flat_params_from(policy.actor)
         policy.actor.zero_grad()
 
@@ -491,25 +494,55 @@ def main(args, cfg_env=None):
                 "Metrics/AdvRStd": data["adv_r"].std(dim=1).mean().item(),
             }
         )
-        # compute loss_pi
-        temp_distribution = policy.actor(data["obs"], data["risk"])
-        log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
-        ratio = torch.exp(log_prob - data["log_prob"])
-        loss_pi = -(ratio * advantage).mean()
-        loss_before = loss_pi.item()
+        # Store old distribution and parameters before any updates
         old_distribution = policy.actor(data["obs"], data["risk"])
+        theta_old = get_flat_params_from(policy.actor)
+        assert theta_old is not None, "theta_old is None after initialization"
+        policy.actor.zero_grad()
 
-        loss_pi.backward()
+        # Compute initial loss before any updates
+        if args.use_sam_actor:
+            with torch.no_grad():
+                temp_distribution = policy.actor(data["obs"], data["risk"])
+                log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+                ratio = torch.exp(log_prob - data["log_prob"])
+                loss_before = -(ratio * advantage).mean().item()
+            
+            # Get SAM gradients at perturbed point
+            sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad = actor_sam_fn(args)(
+                fvp, policy, data, advantage, data["adv_c"].mean(dim=1) + args.cost_beta * data["adv_c"].std(dim=1), data["adv_r"].mean(dim=1),
+                rho=args.sam_rho, 
+                target_kl=args.perturbation_target_kl,
+                num_samples=args.sam_num_samples,
+            )
+            # Use SAM gradients for TRPO update
+            x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, -sam_grads, CONJUGATE_GRADIENT_ITERS)
+            assert torch.isfinite(x).all(), "x is not finite"
+            xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
+            assert xHx.item() >= 0, "xHx is negative"
+            alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
+            step_direction = x * alpha
+            assert torch.isfinite(step_direction).all(), "step_direction is not finite"
+            grads = -sam_grads
 
-        grads = -get_flat_gradients_from(policy.actor)
-        x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, grads, CONJUGATE_GRADIENT_ITERS)
-        assert torch.isfinite(x).all(), "x is not finite"
-        xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
-        assert xHx.item() >= 0, "xHx is negative"
-        alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
-        step_direction = x * alpha
-        assert torch.isfinite(step_direction).all(), "step_direction is not finite"
+        else:
+            temp_distribution = policy.actor(data["obs"], data["risk"])
+            log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
+            ratio = torch.exp(log_prob - data["log_prob"])
+            loss_pi = -(ratio * advantage).mean()
+            loss_before = loss_pi.item()
+            old_distribution = policy.actor(data["obs"], data["risk"])
 
+            loss_pi.backward()
+
+            grads = -get_flat_gradients_from(policy.actor)
+            x = conjugate_gradients(fvp, policy, fvp_obs, fvp_risk, grads, CONJUGATE_GRADIENT_ITERS)
+            assert torch.isfinite(x).all(), "x is not finite"
+            xHx = torch.dot(x, fvp(x, policy, fvp_obs, fvp_risk))
+            assert xHx.item() >= 0, "xHx is negative"
+            alpha = torch.sqrt(2 * config['target_kl'] / (xHx + 1e-8))
+            step_direction = x * alpha
+            assert torch.isfinite(step_direction).all(), "step_direction is not finite"
         step_frac = 1.0
         # Change expected objective function gradient = expected_imrpove best this moment
         expected_improve = grads.dot(step_direction)

@@ -576,7 +576,7 @@ def main(args, cfg_env=None):
             sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad = actor_sam_fn(args)(
                 fvp, policy, data, advantage, data["adv_c"], data["adv_r"],
                 rho=args.sam_rho, 
-                target_kl=args.perturbation_target_kl,
+                target_kl=args.perturbation_target_kl if not args.perturbation_decay else args.perturbation_target_kl / np.sqrt(epoch + 1),
                 num_samples=args.sam_num_samples,
             )
             # Use SAM gradients for TRPO update
@@ -869,6 +869,11 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Cost Value/StdMCReturn")
                 logger.log_tabular("Cost Value/MinMCReturn")
                 logger.log_tabular("Cost Value/MaxMCReturn")
+
+            if args.use_sam_actor and cos_sim is not None and effective_rho is not None and scale_along_grad is not None:
+                logger.log_tabular("Misc/CosineSimilarity")
+                logger.log_tabular("Misc/EffectiveRho")
+                logger.log_tabular("Misc/ScaleAlongGrad")
             if args.use_risk and args.fine_tune_risk:
                 #try:
                 logger.log_tabular("risk/risk_loss")

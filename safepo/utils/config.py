@@ -200,6 +200,7 @@ def single_agent_args():
         {"name": "--sam-type", "type": str, "default": "v1", "help": "SAM type"},
         {"name": "--use-kl", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use KL for SAM"},
         {"name": "--perturbation-target-kl", "type": float, "default": 0.01, "help": "Target KL for SAM"},
+        {"name": "--perturbation-decay", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use perturbation decay"},
         {"name": "--record-gif", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to record GIF"},
         {"name": "--sam-num-samples", "type": int, "default": 10, "help": "Number of samples for SAM"},
         {"name": "--eval-critic-performance", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to evaluate critic performance"},

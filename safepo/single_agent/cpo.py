@@ -354,6 +354,7 @@ def main(args, cfg_env=None):
                         len_deque.append(ep_len[idx])
                         success_deque.append(ep_success[idx])
                         total_violations += np.sum(ep_cost[idx] > args.cost_limit)
+                        total_cost += np.sum(ep_cost[idx])
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),

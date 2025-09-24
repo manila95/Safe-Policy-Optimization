@@ -178,6 +178,9 @@ def compute_sam_gradients_v1(fvp, policy, data, advantage_lag, advantage_cost, a
     
     return sam_grads, perturbed_params, None, None, None
 
+
+
+
 def compute_sam_gradients_v2(fvp, policy, data, advantage_lag, advantage_cost, advantage_reward, rho=0.05, target_kl=0.01, max_search_steps=10, num_samples=10):
     """Compute Sharpness Aware Minimization gradients.
     

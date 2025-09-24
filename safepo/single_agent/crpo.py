@@ -410,13 +410,6 @@ def main(args, cfg_env=None):
                                 "Metrics/EpLen": np.mean(len_deque),
                                 "Metrics/EpSuccess": np.mean(success_deque),
                                 "Metrics/EpSuccessStd": np.std(success_deque),
-                                "Merics/EpCost95": np.quantile(cost_deque, 0.95),
-                                "Merics/EpCost90": np.quantile(cost_deque, 0.9),
-                                "Merics/EpCost80": np.quantile(cost_deque, 0.8),
-                                "Merics/EpCost70": np.quantile(cost_deque, 0.7),
-                                "Merics/EpCost60": np.quantile(cost_deque, 0.6),
-                                
-                                
                                 #"Metrics/EpGoal": np.mean(goal_deque),
                                 "Metrics/TotalCost": total_cost,
                                 "Metrics/ViolationRate": np.mean(np.array(cost_deque) > args.cost_limit),
@@ -567,9 +560,11 @@ def main(args, cfg_env=None):
         assert theta_old is not None, "theta_old is None after initialization"
         policy.actor.zero_grad()
 
-        # compute advantage
-        advantage = data["adv_r"] - lagrange.lagrangian_multiplier * data["adv_c"]
-        advantage /= (lagrange.lagrangian_multiplier + 1)
+
+        if (ep_costs > args.cost_limit + args.crpo_distance):
+            advantage = -data["adv_c"] * args.crpo_lambda_c
+        else:
+            advantage = data["adv_r"]
         
         # Compute initial loss before any updates
         if args.use_sam_actor:
@@ -812,11 +807,6 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpSuccessStd")
             logger.log_tabular("Metrics/EpRetStd")
             logger.log_tabular("Metrics/EpCostStd")
-            logger.log_tabular("Merics/EpCost95")
-            logger.log_tabular("Merics/EpCost90")
-            logger.log_tabular("Merics/EpCost80")
-            logger.log_tabular("Merics/EpCost70")
-            logger.log_tabular("Merics/EpCost60")
             #logger.log_tabular("Metrics/EpGoal")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")

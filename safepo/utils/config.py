@@ -207,6 +207,9 @@ def single_agent_args():
         {"name": "--use-sam-actor-reward", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use SAM for actor reward update"},
         {"name": "--use-sam-actor-cost", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use SAM for actor cost update"},
         {"name": "--crpo-distance", "type": float, "default": 0.0, "help": "Distance for CRPO"},
+        {"name": "--crpo-lambda-c", "type": float, "default": 1.0, "help": "Lambda for CRPO"},
+        {"name": "--focops-nu", "type": float, "default": 2.0, "help": "Nu for FOCOPS"},
+        {"name": "--focops-lambda", "type": float, "default": 1.5, "help": "Lambda for FOCOPS"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

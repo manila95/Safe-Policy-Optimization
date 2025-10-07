@@ -53,62 +53,6 @@ def build_mlp_network(sizes, use_layer_norm=False):
 
 
 
-class RiskEst(nn.Module):
-    def __init__(self, obs_dim: int, risk_dim: int, hidden_sizes: list = [64, 64]):
-        super().__init__()
-        self.risk_model = build_mlp_network([obs_dim]+hidden_sizes+[risk_dim])
-        self.logsoftmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, obs: torch.Tensor):
-        x = self.risk_model(obs)
-        return self.logsoftmax(x)
-
-
-class RiskNet(nn.Module):
-    def __init__(self, sizes, risk_size, use_layer_norm=False):
-        super().__init__()
-        self.affine_obs = nn.Linear(sizes[0], sizes[1])
-        self.affine_risk = nn.Linear(risk_size, 12)
-        self.activation = nn.Tanh()
-        self.use_layer_norm = use_layer_norm
-
-        if use_layer_norm:
-            self.obs_norm = nn.LayerNorm(sizes[1])
-            self.risk_norm = nn.LayerNorm(12)
-
-        sizes[1] += 12
-        self.rest = build_mlp_network(sizes[1:], use_layer_norm=use_layer_norm)
-
-    def forward(self, x, risk):
-        obs = self.activation(self.affine_obs(x))
-        risk = self.activation(self.affine_risk(risk))
-        
-        if self.use_layer_norm:
-            obs = self.obs_norm(obs)
-            risk = self.risk_norm(risk)
-            
-        x = torch.cat([obs, risk], axis=-1)
-        return self.rest(x)
-
-
-def build_risk_mlp_network(sizes, risk_size, use_layer_norm=False):
-    """
-    Build a multi-layer perceptron (MLP) neural network with risk information.
-
-    This function constructs an MLP network with the specified layer sizes and activation functions,
-    incorporating risk information into the network.
-
-    Args:
-        sizes (list of int): List of integers representing the sizes of each layer in the network.
-        risk_size (int): Size of the risk information input.
-        use_layer_norm (bool): Whether to use layer normalization after each linear layer.
-
-    Returns:
-        RiskNet: An instance of the RiskNet module representing the constructed MLP with risk information.
-    """
-    return RiskNet(sizes, risk_size, use_layer_norm=use_layer_norm)
-
-
 class Actor(nn.Module):
     """
     Actor network for policy-based reinforcement learning.
@@ -135,20 +79,14 @@ class Actor(nn.Module):
         action_distribution = actor(observation)
     """
 
-    def __init__(self, obs_dim: int, act_dim: int, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, use_layer_norm=False):
+    def __init__(self, obs_dim: int, act_dim: int, hidden_sizes: list = [64, 64], use_layer_norm=False):
         super().__init__()
-        self.use_risk = use_risk
-        if use_risk:
-            self.mean = build_risk_mlp_network([obs_dim]+hidden_sizes+[act_dim], risk_size, use_layer_norm=use_layer_norm)
-        else:
-            self.mean = build_mlp_network([obs_dim]+hidden_sizes+[act_dim], use_layer_norm=use_layer_norm)
+
+        self.mean = build_mlp_network([obs_dim]+hidden_sizes+[act_dim], use_layer_norm=use_layer_norm)
         self.log_std = nn.Parameter(torch.zeros(act_dim), requires_grad=True)
 
-    def forward(self, obs: torch.Tensor, risk=None):
-        if self.use_risk:
-            mean = self.mean(obs, risk)
-        else:
-            mean = self.mean(obs)
+    def forward(self, obs: torch.Tensor):
+        mean = self.mean(obs)
         std = torch.exp(self.log_std)
         return Normal(mean, std)
 
@@ -176,19 +114,12 @@ class VCritic(nn.Module):
         value_estimate = critic(observation)
     """
 
-    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, use_layer_norm=False):
+    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_layer_norm=False):
         super().__init__()
-        self.use_risk = use_risk
-        if self.use_risk:
-            self.critic = build_risk_mlp_network([obs_dim]+hidden_sizes+[1], risk_size)
-        else:
-            self.critic = build_mlp_network([obs_dim]+hidden_sizes+[1], use_layer_norm=use_layer_norm)
+        self.critic = build_mlp_network([obs_dim]+hidden_sizes+[1], use_layer_norm=use_layer_norm)
 
-    def forward(self, obs, risk=None):
-        if self.use_risk:
-            return torch.squeeze(self.critic(obs, risk), -1)
-        else:
-            return torch.squeeze(self.critic(obs), -1)
+    def forward(self, obs):
+        return torch.squeeze(self.critic(obs), -1)
 
 
 class ActorVCritic(nn.Module):
@@ -216,18 +147,14 @@ class ActorVCritic(nn.Module):
         value_estimate = actor_critic.get_value(observation)
     """
 
-    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, 
+    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], 
                  use_actor_layer_norm=False, use_critic_layer_norm=False):
         super().__init__()
-        self.use_risk = use_risk
-        self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, 
-                                    use_layer_norm=use_critic_layer_norm)
-        self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, 
-                                  use_layer_norm=use_critic_layer_norm)
-        self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, 
-                          use_layer_norm=use_actor_layer_norm)
+        self.reward_critic = VCritic(obs_dim, hidden_sizes, use_layer_norm=use_critic_layer_norm)
+        self.cost_critic = VCritic(obs_dim, hidden_sizes, use_layer_norm=use_critic_layer_norm)
+        self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_layer_norm=use_actor_layer_norm)
 
-    def get_value(self, obs, risk=None):
+    def get_value(self, obs):
         """
         Estimate the value of observations using the critic network.
 
@@ -237,12 +164,9 @@ class ActorVCritic(nn.Module):
         Returns:
             torch.Tensor: Estimated value for the input observation.
         """
-        if self.use_risk:
-            return self.critic(obs, risk)
-        else:
-            return self.critic(obs)
+        return self.critic(obs)
 
-    def step(self, obs, risk=None, deterministic=False):
+    def step(self, obs, deterministic=False):
         """
         Take a policy step based on observations.
 
@@ -255,21 +179,14 @@ class ActorVCritic(nn.Module):
                    and cost value estimate.
         """
 
-        if self.use_risk:
-            dist = self.actor(obs, risk)
-        else:
-            dist = self.actor(obs)
+        dist = self.actor(obs)
         if deterministic:
             action = dist.mean
         else:
             action = dist.rsample()
         log_prob = dist.log_prob(action).sum(axis=-1)
-        if self.use_risk:
-            value_r = self.reward_critic(obs, risk)
-            value_c = self.cost_critic(obs, risk)
-        else:
-            value_r = self.reward_critic(obs)
-            value_c = self.cost_critic(obs)
+        value_r = self.reward_critic(obs)
+        value_c = self.cost_critic(obs)
         return action, log_prob, value_r, value_c
 
 class MultiAgentActor(nn.Module):

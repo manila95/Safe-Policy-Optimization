@@ -40,7 +40,7 @@ from safepo.common.buffer import VectorizedOnPolicyBuffer
 from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
 from safepo.common.lagrange import PIDLagrangian as Lagrange
 from safepo.common.logger import EpochLogger
-from safepo.common.model import ActorVCritic
+from safepo.common.model import ActorVCritic, BayesRiskEst, RiskEst
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
 from safepo.single_agent.utils import *
 from sam import *
@@ -174,7 +174,7 @@ def main(args, cfg_env=None):
     #            sync_tensorboard=True, save_code=True)
 
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
-    risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num)])
+    risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = env_fn(args.task)(
@@ -215,8 +215,8 @@ def main(args, cfg_env=None):
     )
 
     if args.use_risk:
-        risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
-                    "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
+        #risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
+        #            "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
 
         risk_model = BayesRiskEst(obs_size=obs_space.shape[0], batch_norm=True, out_size=risk_size)
         if os.path.exists(args.risk_model_path):

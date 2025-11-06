@@ -210,6 +210,14 @@ def single_agent_args():
         {"name": "--crpo-lambda-c", "type": float, "default": 1.0, "help": "Lambda for CRPO"},
         {"name": "--focops-nu", "type": float, "default": 2.0, "help": "Nu for FOCOPS"},
         {"name": "--focops-lambda", "type": float, "default": 1.5, "help": "Lambda for FOCOPS"},
+        # Truncated Quantile Critics (TQC) parameters
+        {"name": "--use-tqc", "type": lambda x: bool(strtobool(x)), "default": False, "help": "Whether to use Truncated Quantile Critics instead of standard critics"},
+        {"name": "--tqc-n-critics", "type": int, "default": 5, "help": "Number of quantile critic networks in TQC"},
+        {"name": "--tqc-n-quantiles", "type": int, "default": 25, "help": "Number of quantiles per critic in TQC"},
+        {"name": "--tqc-n-truncate-reward", "type": int, "default": None, "help": "Number of quantiles to keep for reward critic (default: auto = 50%)"},
+        {"name": "--tqc-n-truncate-cost", "type": int, "default": None, "help": "Number of quantiles to keep for cost critic (default: auto = 50%, use higher for conservative cost estimation)"},
+        {"name": "--tqc-huber-kappa", "type": float, "default": 1.0, "help": "Huber loss threshold for TQC quantile regression"},
+        {"name": "--tqc-lr", "type": float, "default": 1e-3, "help": "Learning rate for TQC critics"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

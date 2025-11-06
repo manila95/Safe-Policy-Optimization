@@ -191,6 +191,224 @@ class VCritic(nn.Module):
             return torch.squeeze(self.critic(obs), -1)
 
 
+class QuantileCritic(nn.Module):
+    """
+    Quantile critic network for distributional value estimation.
+
+    This class represents a critic network that estimates multiple quantiles of the value distribution.
+
+    Args:
+        obs_dim (int): Dimensionality of the observation space.
+        n_quantiles (int): Number of quantiles to estimate (default: 25).
+        hidden_sizes (list): List of hidden layer sizes.
+        use_risk (bool): Whether to use risk information.
+        risk_size (int): Size of risk information.
+        use_layer_norm (bool): Whether to use layer normalization.
+
+    Attributes:
+        n_quantiles (int): Number of quantiles.
+        critic (nn.Sequential): MLP network outputting quantile values.
+
+    Example:
+        obs_dim = 10
+        critic = QuantileCritic(obs_dim, n_quantiles=25)
+        observation = torch.randn(1, obs_dim)
+        quantiles = critic(observation)  # Shape: [batch_size, n_quantiles]
+    """
+
+    def __init__(self, obs_dim, n_quantiles: int = 25, hidden_sizes: list = [64, 64], 
+                 use_risk=False, risk_size=None, use_layer_norm=False):
+        super().__init__()
+        self.use_risk = use_risk
+        self.n_quantiles = n_quantiles
+        
+        if self.use_risk:
+            self.critic = build_risk_mlp_network([obs_dim] + hidden_sizes + [n_quantiles], risk_size, use_layer_norm=use_layer_norm)
+        else:
+            self.critic = build_mlp_network([obs_dim] + hidden_sizes + [n_quantiles], use_layer_norm=use_layer_norm)
+
+    def forward(self, obs, risk=None):
+        """
+        Forward pass through the quantile critic.
+
+        Args:
+            obs (torch.Tensor): Input observation tensor.
+            risk (torch.Tensor, optional): Risk information tensor.
+
+        Returns:
+            torch.Tensor: Quantile values of shape [batch_size, n_quantiles].
+        """
+        if self.use_risk:
+            return self.critic(obs, risk)
+        else:
+            return self.critic(obs)
+
+
+class TruncatedQuantileCritic(nn.Module):
+    """
+    Truncated Quantile Critic for value estimation with reduced overestimation bias.
+
+    This class implements the TQC (Truncated Quantile Critics) approach, using multiple
+    quantile networks to estimate the value distribution and truncating across predictions
+    to reduce overestimation bias.
+
+    Args:
+        obs_dim (int): Dimensionality of the observation space.
+        n_critics (int): Number of critic networks (default: 5).
+        n_quantiles (int): Number of quantiles per critic (default: 25).
+        n_truncate (int): Number of quantiles to keep after truncation (default: 2).
+                         If None, uses min(n_critics * n_quantiles // 2, n_critics * n_quantiles - 1).
+        hidden_sizes (list): List of hidden layer sizes.
+        use_risk (bool): Whether to use risk information.
+        risk_size (int): Size of risk information.
+        use_layer_norm (bool): Whether to use layer normalization.
+        huber_kappa (float): Threshold for Huber loss (default: 1.0).
+
+    Attributes:
+        n_critics (int): Number of critic networks.
+        n_quantiles (int): Number of quantiles per critic.
+        n_truncate (int): Number of quantiles to keep after truncation.
+        critics (nn.ModuleList): List of quantile critic networks.
+        huber_kappa (float): Threshold for Huber loss.
+
+    Example:
+        obs_dim = 10
+        critic = TruncatedQuantileCritic(obs_dim, n_critics=5, n_quantiles=25, n_truncate=2)
+        observation = torch.randn(8, obs_dim)
+        
+        # Get value estimate (mean of truncated quantiles)
+        value = critic.get_value(observation)
+        
+        # Get all quantiles for loss computation
+        all_quantiles = critic(observation)  # Shape: [batch_size, n_critics, n_quantiles]
+    """
+
+    def __init__(self, obs_dim, n_critics: int = 5, n_quantiles: int = 25, n_truncate: int = None,
+                 hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, 
+                 use_layer_norm=False, huber_kappa: float = 1.0):
+        super().__init__()
+        self.n_critics = n_critics
+        self.n_quantiles = n_quantiles
+        self.use_risk = use_risk
+        self.huber_kappa = huber_kappa
+        
+        # Default truncation: keep roughly half of all quantiles
+        if n_truncate is None:
+            total_quantiles = n_critics * n_quantiles
+            self.n_truncate = min(total_quantiles // 2, total_quantiles - 1)
+        else:
+            self.n_truncate = n_truncate
+            
+        # Create multiple quantile critics
+        self.critics = nn.ModuleList([
+            QuantileCritic(obs_dim, n_quantiles, hidden_sizes, use_risk, risk_size, use_layer_norm)
+            for _ in range(n_critics)
+        ])
+
+    def forward(self, obs, risk=None):
+        """
+        Forward pass through all quantile critics.
+
+        Args:
+            obs (torch.Tensor): Input observation tensor of shape [batch_size, obs_dim].
+            risk (torch.Tensor, optional): Risk information tensor.
+
+        Returns:
+            torch.Tensor: All quantile values of shape [batch_size, n_critics, n_quantiles].
+        """
+        if self.use_risk:
+            quantiles = [critic(obs, risk) for critic in self.critics]
+        else:
+            quantiles = [critic(obs) for critic in self.critics]
+        
+        # Stack to shape [batch_size, n_critics, n_quantiles]
+        return torch.stack(quantiles, dim=1)
+
+    def get_value(self, obs, risk=None):
+        """
+        Get the value estimate by truncating and averaging quantiles.
+
+        Args:
+            obs (torch.Tensor): Input observation tensor of shape [batch_size, obs_dim].
+            risk (torch.Tensor, optional): Risk information tensor.
+
+        Returns:
+            torch.Tensor: Value estimate of shape [batch_size].
+        """
+        with torch.no_grad():
+            all_quantiles = self.forward(obs, risk)  # [batch_size, n_critics, n_quantiles]
+            batch_size = all_quantiles.shape[0]
+            
+            # Flatten quantiles across critics: [batch_size, n_critics * n_quantiles]
+            all_quantiles = all_quantiles.view(batch_size, -1)
+            
+            # Sort and truncate: keep the smallest n_truncate quantiles
+            sorted_quantiles, _ = torch.sort(all_quantiles, dim=1)
+            truncated_quantiles = sorted_quantiles[:, :self.n_truncate]
+            
+            # Return mean of truncated quantiles
+            return truncated_quantiles.mean(dim=1)
+
+    def quantile_huber_loss(self, quantiles, targets):
+        """
+        Compute the quantile Huber loss for distributional RL.
+
+        Args:
+            quantiles (torch.Tensor): Predicted quantiles of shape [batch_size, n_quantiles].
+            targets (torch.Tensor): Target values of shape [batch_size].
+
+        Returns:
+            torch.Tensor: Quantile Huber loss value.
+        """
+        batch_size = quantiles.shape[0]
+        
+        # Expand targets to match quantiles shape
+        targets = targets.unsqueeze(-1)  # [batch_size, 1]
+        
+        # Compute TD errors
+        td_errors = targets - quantiles  # [batch_size, n_quantiles]
+        
+        # Huber loss
+        huber_loss = torch.where(
+            td_errors.abs() <= self.huber_kappa,
+            0.5 * td_errors.pow(2),
+            self.huber_kappa * (td_errors.abs() - 0.5 * self.huber_kappa)
+        )
+        
+        # Quantile weights (tau values)
+        tau = torch.arange(0.5 / self.n_quantiles, 1.0, 1.0 / self.n_quantiles, 
+                          device=quantiles.device, dtype=quantiles.dtype)
+        tau = tau.view(1, -1)  # [1, n_quantiles]
+        
+        # Quantile regression loss
+        quantile_weight = torch.abs(tau - (td_errors < 0).float())
+        quantile_loss = quantile_weight * huber_loss
+        
+        return quantile_loss.mean()
+
+    def compute_loss(self, obs, targets, risk=None):
+        """
+        Compute the total loss across all quantile critics.
+
+        Args:
+            obs (torch.Tensor): Input observation tensor of shape [batch_size, obs_dim].
+            targets (torch.Tensor): Target values of shape [batch_size].
+            risk (torch.Tensor, optional): Risk information tensor.
+
+        Returns:
+            torch.Tensor: Total loss value.
+        """
+        all_quantiles = self.forward(obs, risk)  # [batch_size, n_critics, n_quantiles]
+        
+        total_loss = 0.0
+        for i in range(self.n_critics):
+            quantiles = all_quantiles[:, i, :]  # [batch_size, n_quantiles]
+            loss = self.quantile_huber_loss(quantiles, targets)
+            total_loss += loss
+            
+        return total_loss / self.n_critics
+
+
 class ActorVCritic(nn.Module):
     """
     Actor-critic policy for reinforcement learning.
@@ -270,6 +488,152 @@ class ActorVCritic(nn.Module):
         else:
             value_r = self.reward_critic(obs)
             value_c = self.cost_critic(obs)
+        return action, log_prob, value_r, value_c
+
+
+class ActorTQC(nn.Module):
+    """
+    Actor-critic policy with Truncated Quantile Critics.
+
+    This class combines an actor network with truncated quantile critics for both reward
+    and cost estimation, providing better value estimates with reduced overestimation bias.
+
+    Args:
+        obs_dim (int): Dimensionality of the observation space.
+        act_dim (int): Dimensionality of the action space.
+        hidden_sizes (list): List of hidden layer sizes.
+        n_critics (int): Number of critic networks per TQC (default: 5).
+        n_quantiles (int): Number of quantiles per critic (default: 25).
+        n_truncate_reward (int): Number of quantiles to keep for reward (default: None).
+        n_truncate_cost (int): Number of quantiles to keep for cost (default: None).
+        use_risk (bool): Whether to use risk information.
+        risk_size (int): Size of risk information.
+        use_actor_layer_norm (bool): Whether to use layer normalization in actor.
+        use_critic_layer_norm (bool): Whether to use layer normalization in critics.
+        huber_kappa (float): Threshold for Huber loss (default: 1.0).
+
+    Example:
+        obs_dim = 10
+        act_dim = 2
+        actor_critic = ActorTQC(obs_dim, act_dim, n_critics=5, n_quantiles=25)
+        observation = torch.randn(1, obs_dim)
+        action, log_prob, reward_value, cost_value = actor_critic.step(observation)
+        
+        # For training, compute losses:
+        reward_targets = torch.randn(32)
+        cost_targets = torch.randn(32)
+        reward_loss = actor_critic.reward_critic.compute_loss(observation, reward_targets)
+        cost_loss = actor_critic.cost_critic.compute_loss(observation, cost_targets)
+    """
+
+    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], 
+                 n_critics: int = 5, n_quantiles: int = 25,
+                 n_truncate_reward: int = None, n_truncate_cost: int = None,
+                 use_risk=False, risk_size=None, 
+                 use_actor_layer_norm=False, use_critic_layer_norm=False,
+                 huber_kappa: float = 1.0):
+        super().__init__()
+        self.use_risk = use_risk
+        
+        # Create truncated quantile critics for reward and cost
+        self.reward_critic = TruncatedQuantileCritic(
+            obs_dim=obs_dim,
+            n_critics=n_critics,
+            n_quantiles=n_quantiles,
+            n_truncate=n_truncate_reward,
+            hidden_sizes=hidden_sizes,
+            use_risk=use_risk,
+            risk_size=risk_size,
+            use_layer_norm=use_critic_layer_norm,
+            huber_kappa=huber_kappa
+        )
+        
+        self.cost_critic = TruncatedQuantileCritic(
+            obs_dim=obs_dim,
+            n_critics=n_critics,
+            n_quantiles=n_quantiles,
+            n_truncate=n_truncate_cost,
+            hidden_sizes=hidden_sizes,
+            use_risk=use_risk,
+            risk_size=risk_size,
+            use_layer_norm=use_critic_layer_norm,
+            huber_kappa=huber_kappa
+        )
+        
+        # Actor network
+        self.actor = Actor(
+            obs_dim=obs_dim,
+            act_dim=act_dim,
+            hidden_sizes=hidden_sizes,
+            use_risk=use_risk,
+            risk_size=risk_size,
+            use_layer_norm=use_actor_layer_norm
+        )
+
+    def get_value(self, obs, risk=None):
+        """
+        Estimate the reward value of observations using the truncated quantile critic.
+
+        Args:
+            obs (torch.Tensor): Input observation tensor.
+            risk (torch.Tensor, optional): Risk information tensor.
+
+        Returns:
+            torch.Tensor: Estimated reward value for the input observation.
+        """
+        if self.use_risk:
+            return self.reward_critic.get_value(obs, risk)
+        else:
+            return self.reward_critic.get_value(obs)
+
+    def get_cost_value(self, obs, risk=None):
+        """
+        Estimate the cost value of observations using the truncated quantile critic.
+
+        Args:
+            obs (torch.Tensor): Input observation tensor.
+            risk (torch.Tensor, optional): Risk information tensor.
+
+        Returns:
+            torch.Tensor: Estimated cost value for the input observation.
+        """
+        if self.use_risk:
+            return self.cost_critic.get_value(obs, risk)
+        else:
+            return self.cost_critic.get_value(obs)
+
+    def step(self, obs, risk=None, deterministic=False):
+        """
+        Take a policy step based on observations.
+
+        Args:
+            obs (torch.Tensor): Input observation tensor.
+            risk (torch.Tensor, optional): Risk information tensor.
+            deterministic (bool): Flag indicating whether to take a deterministic action.
+
+        Returns:
+            tuple: Tuple containing action tensor, log probabilities of the action,
+                   reward value estimate, and cost value estimate.
+        """
+        if self.use_risk:
+            dist = self.actor(obs, risk)
+        else:
+            dist = self.actor(obs)
+            
+        if deterministic:
+            action = dist.mean
+        else:
+            action = dist.rsample()
+            
+        log_prob = dist.log_prob(action).sum(axis=-1)
+        
+        if self.use_risk:
+            value_r = self.reward_critic.get_value(obs, risk)
+            value_c = self.cost_critic.get_value(obs, risk)
+        else:
+            value_r = self.reward_critic.get_value(obs)
+            value_c = self.cost_critic.get_value(obs)
+            
         return action, log_prob, value_r, value_c
 
 class MultiAgentActor(nn.Module):

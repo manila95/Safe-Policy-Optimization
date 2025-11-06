@@ -40,7 +40,7 @@ from safepo.common.buffer import VectorizedOnPolicyBuffer
 from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
 from safepo.common.lagrange import PIDLagrangian as Lagrange
 from safepo.common.logger import EpochLogger
-from safepo.common.model import ActorVCritic
+from safepo.common.model import ActorVCritic, ActorTQC
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
 from safepo.single_agent.utils import *
 from sam import *
@@ -198,20 +198,40 @@ def main(args, cfg_env=None):
     local_steps_per_epoch = steps_per_epoch // args.num_envs
     epochs = total_steps // steps_per_epoch
     # create the actor-critic module
-    policy = ActorVCritic(
-        obs_dim=obs_space.shape[0],
-        act_dim=act_space.shape[0],
-        hidden_sizes=config["hidden_sizes"],
-        use_risk=args.use_risk,
-        risk_size=risk_size,
-        use_actor_layer_norm=args.use_actor_layer_norm,
-        use_critic_layer_norm=args.use_critic_layer_norm,
-    ).to(device)
+    if args.use_tqc:
+        print(f"Using Truncated Quantile Critics with n_critics={args.tqc_n_critics}, "
+              f"n_quantiles={args.tqc_n_quantiles}, n_truncate_reward={args.tqc_n_truncate_reward}, "
+              f"n_truncate_cost={args.tqc_n_truncate_cost}")
+        policy = ActorTQC(
+            obs_dim=obs_space.shape[0],
+            act_dim=act_space.shape[0],
+            hidden_sizes=config["hidden_sizes"],
+            n_critics=args.tqc_n_critics,
+            n_quantiles=args.tqc_n_quantiles,
+            n_truncate_reward=args.tqc_n_truncate_reward,
+            n_truncate_cost=args.tqc_n_truncate_cost,
+            use_risk=args.use_risk,
+            risk_size=risk_size,
+            use_actor_layer_norm=args.use_actor_layer_norm,
+            use_critic_layer_norm=args.use_critic_layer_norm,
+            huber_kappa=args.tqc_huber_kappa,
+        ).to(device)
+    else:
+        policy = ActorVCritic(
+            obs_dim=obs_space.shape[0],
+            act_dim=act_space.shape[0],
+            hidden_sizes=config["hidden_sizes"],
+            use_risk=args.use_risk,
+            risk_size=risk_size,
+            use_actor_layer_norm=args.use_actor_layer_norm,
+            use_critic_layer_norm=args.use_critic_layer_norm,
+        ).to(device)
+    
     reward_critic_optimizer = torch.optim.Adam(
-        policy.reward_critic.parameters(), lr=1e-3
+        policy.reward_critic.parameters(), lr=args.tqc_lr if args.use_tqc else 1e-3
     )
     cost_critic_optimizer = torch.optim.Adam(
-        policy.cost_critic.parameters(), lr=1e-3
+        policy.cost_critic.parameters(), lr=args.tqc_lr if args.use_tqc else 1e-3
     )
 
     if args.use_risk:
@@ -710,7 +730,16 @@ def main(args, cfg_env=None):
                 
                 # Update reward critic
                 reward_critic_optimizer.zero_grad()
-                if args.use_sam_reward_critic:
+                if args.use_tqc:
+                    # TQC uses its own compute_loss method with quantile Huber loss
+                    loss_r = policy.reward_critic.compute_loss(obs_b, target_value_r_b, risk_b)
+                    if config.get("use_critic_norm", True):
+                        for param in policy.reward_critic.parameters():
+                            loss_r += param.pow(2).sum() * 0.001
+                    loss_r.backward()
+                    clip_grad_norm_(policy.reward_critic.parameters(), config["max_grad_norm"])
+                    reward_critic_optimizer.step()
+                elif args.use_sam_reward_critic:
                     if args.sam_type == "v4":
                         sam_grads_r, _ = compute_sam_gradients_critic_v4(
                             policy.reward_critic, 
@@ -735,8 +764,9 @@ def main(args, cfg_env=None):
                     clip_grad_norm_(policy.reward_critic.parameters(), config["max_grad_norm"])
                     reward_critic_optimizer.step()
                 else:
-                    # Standard reward critic update
-                    loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
+                    # Standard reward critic update with MSE loss
+                    value_r = policy.reward_critic.get_value(obs_b, risk_b) if args.use_tqc else policy.reward_critic(obs_b, risk_b)
+                    loss_r = nn.functional.mse_loss(value_r, target_value_r_b)
                     if config.get("use_critic_norm", True):
                         for param in policy.reward_critic.parameters():
                             loss_r += param.pow(2).sum() * 0.001
@@ -746,7 +776,16 @@ def main(args, cfg_env=None):
                 
                 # Update cost critic
                 cost_critic_optimizer.zero_grad()
-                if args.use_sam_cost_critic:
+                if args.use_tqc:
+                    # TQC uses its own compute_loss method with quantile Huber loss
+                    loss_c = policy.cost_critic.compute_loss(obs_b, target_value_c_b, risk_b)
+                    if config.get("use_critic_norm", True):
+                        for param in policy.cost_critic.parameters():
+                            loss_c += param.pow(2).sum() * 0.001
+                    loss_c.backward()
+                    clip_grad_norm_(policy.cost_critic.parameters(), config["max_grad_norm"])
+                    cost_critic_optimizer.step()
+                elif args.use_sam_cost_critic:
                     if args.sam_type == "v4":
                         sam_grads_c, _ = compute_sam_gradients_critic_v4(
                             policy.cost_critic, 
@@ -771,8 +810,9 @@ def main(args, cfg_env=None):
                     clip_grad_norm_(policy.cost_critic.parameters(), config["max_grad_norm"])
                     cost_critic_optimizer.step()
                 else:
-                    # Standard cost critic update
-                    loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b, risk_b), target_value_c_b)
+                    # Standard cost critic update with MSE loss
+                    value_c = policy.cost_critic.get_value(obs_b, risk_b) if args.use_tqc else policy.cost_critic(obs_b, risk_b)
+                    loss_c = nn.functional.mse_loss(value_c, target_value_c_b)
                     if config.get("use_critic_norm", True):
                         for param in policy.cost_critic.parameters():
                             loss_c += param.pow(2).sum() * 0.001
@@ -782,8 +822,12 @@ def main(args, cfg_env=None):
 
                 # Compute losses for logging (always compute for logging purposes)
                 with torch.no_grad():
-                    value_r = policy.reward_critic(obs_b, risk_b)
-                    value_c = policy.cost_critic(obs_b, risk_b)
+                    if args.use_tqc:
+                        value_r = policy.reward_critic.get_value(obs_b, risk_b)
+                        value_c = policy.cost_critic.get_value(obs_b, risk_b)
+                    else:
+                        value_r = policy.reward_critic(obs_b, risk_b)
+                        value_c = policy.cost_critic(obs_b, risk_b)
                     loss_r = nn.functional.mse_loss(value_r, target_value_r_b)
                     loss_c = nn.functional.mse_loss(value_c, target_value_c_b)
                 

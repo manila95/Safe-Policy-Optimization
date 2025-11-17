@@ -578,12 +578,20 @@ def main(args, cfg_env=None):
                 log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
                 ratio = torch.exp(log_prob - data["log_prob"])
                 loss_before = -(ratio * advantage).mean().item()
+
+
+            if args.perturbation_decay:
+                import scipy
+                z_alpha = scipy.stats.norm.ppf(args.shapo_alpha)
+                perturbation_target_kl = z_alpha**2 / (2*(epoch + 1)*steps_per_epoch)
+            else:
+                perturbation_target_kl = args.perturbation_target_kl
             
             # Get SAM gradients at perturbed point
             sam_grads, perturbed_params, cos_sim, effective_rho, scale_along_grad = actor_sam_fn(args)(
                 fvp, policy, data, advantage, data["adv_c"], data["adv_r"],
                 rho=args.sam_rho, 
-                target_kl=args.perturbation_target_kl if not args.perturbation_decay else args.perturbation_target_kl / np.sqrt(epoch + 1),
+                target_kl=perturbation_target_kl,
                 num_samples=args.sam_num_samples,
             )
             # Use SAM gradients for TRPO update

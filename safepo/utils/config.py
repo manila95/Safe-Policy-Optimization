@@ -210,6 +210,7 @@ def single_agent_args():
         {"name": "--crpo-lambda-c", "type": float, "default": 1.0, "help": "Lambda for CRPO"},
         {"name": "--focops-nu", "type": float, "default": 2.0, "help": "Nu for FOCOPS"},
         {"name": "--focops-lambda", "type": float, "default": 1.5, "help": "Lambda for FOCOPS"},
+        {"name": "--shapo-alpha", "type": float, "default": 0.05, "help": "Alpha for SHAPO"},
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

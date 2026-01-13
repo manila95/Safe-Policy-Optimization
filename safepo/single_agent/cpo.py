@@ -201,12 +201,20 @@ def main(args, cfg_env=None):
         hidden_sizes=config["hidden_sizes"],
         use_risk=args.use_risk,
         risk_size=args.quantile_num,
+        use_double_critic=True,  # Enable double critic for evaluation
     ).to(device)
     reward_critic_optimizer = torch.optim.Adam(
         policy.reward_critic.parameters(), lr=1e-3
     )
     cost_critic_optimizer = torch.optim.Adam(
         policy.cost_critic.parameters(), lr=1e-3
+    )
+    # Optimizers for evaluation critics (trained separately, not used for policy updates)
+    reward_critic_eval_optimizer = torch.optim.Adam(
+        policy.reward_critic_eval.parameters(), lr=1e-3
+    )
+    cost_critic_eval_optimizer = torch.optim.Adam(
+        policy.cost_critic_eval.parameters(), lr=1e-3
     )
 
     # create the vectorized on-policy buffer
@@ -381,7 +389,7 @@ def main(args, cfg_env=None):
                 }
             )
 
-        if epoch % 20 == 0:
+        if True:
             # Evaluate critic performance using fresh rollouts
             critic_metrics = evaluate_critic_performance_from_rollouts(
                 policy=policy,
@@ -396,45 +404,72 @@ def main(args, cfg_env=None):
             )
 
             # Log the critic evaluation metrics
-            logger.store(
-                **{
-                    # Reward critic metrics
-                    "Reward Value/EstimationError": critic_metrics['reward_critic']['mean_error'],
-                    "Reward Value/MeanAbsError": critic_metrics['reward_critic']['mean_abs_error'],
-                    "Reward Value/OverestimationRatio": critic_metrics['reward_critic']['overestimation_ratio'],
-                    "Reward Value/UnderestimationRatio": critic_metrics['reward_critic']['underestimation_ratio'],
-                    "Reward Value/MaxError": critic_metrics['reward_critic']['max_error'],
-                    "Reward Value/PearsonCorr": critic_metrics['reward_critic']['pearson_corr'],
-                    "Reward Value/SpearmanCorr": critic_metrics['reward_critic']['spearman_corr'],
-                    "Reward Value/KendallCorr": critic_metrics['reward_critic']['kendall_corr'],
-                    "Reward Value/MeanPredicted": critic_metrics['reward_critic']['mean_value'],
-                    "Reward Value/StdPredicted": critic_metrics['reward_critic']['std_value'],
-                    "Reward Value/MinPredicted": critic_metrics['reward_critic']['min_value'],
-                    "Reward Value/MaxPredicted": critic_metrics['reward_critic']['max_value'],
-                    "Reward Value/MeanMCReturn": critic_metrics['reward_critic']['mean_mc_return'],
-                    "Reward Value/StdMCReturn": critic_metrics['reward_critic']['std_mc_return'],
-                    "Reward Value/MinMCReturn": critic_metrics['reward_critic']['min_mc_return'],
-                    "Reward Value/MaxMCReturn": critic_metrics['reward_critic']['max_mc_return'],
-                    
-                    # Cost critic metrics
-                    "Cost Value/EstimationError": critic_metrics['cost_critic']['mean_error'],
-                    "Cost Value/MeanAbsError": critic_metrics['cost_critic']['mean_abs_error'],
-                    "Cost Value/OverestimationRatio": critic_metrics['cost_critic']['overestimation_ratio'],
-                    "Cost Value/UnderestimationRatio": critic_metrics['cost_critic']['underestimation_ratio'],
-                    "Cost Value/MaxError": critic_metrics['cost_critic']['max_error'],
-                    "Cost Value/PearsonCorr": critic_metrics['cost_critic']['pearson_corr'],
-                    "Cost Value/SpearmanCorr": critic_metrics['cost_critic']['spearman_corr'],
-                    "Cost Value/KendallCorr": critic_metrics['cost_critic']['kendall_corr'],
-                    "Cost Value/MeanPredicted": critic_metrics['cost_critic']['mean_value'],
-                    "Cost Value/StdPredicted": critic_metrics['cost_critic']['std_value'],
-                    "Cost Value/MinPredicted": critic_metrics['cost_critic']['min_value'],
-                    "Cost Value/MaxPredicted": critic_metrics['cost_critic']['max_value'],
-                    "Cost Value/MeanMCReturn": critic_metrics['cost_critic']['mean_mc_return'],
-                    "Cost Value/StdMCReturn": critic_metrics['cost_critic']['std_mc_return'],
-                    "Cost Value/MinMCReturn": critic_metrics['cost_critic']['min_mc_return'],
-                    "Cost Value/MaxMCReturn": critic_metrics['cost_critic']['max_mc_return'],
-                }
-            )
+            log_dict = {
+                # Reward critic metrics
+                "Reward Value/EstimationError": critic_metrics['reward_critic']['mean_error'],
+                "Reward Value/MeanAbsError": critic_metrics['reward_critic']['mean_abs_error'],
+                "Reward Value/OverestimationRatio": critic_metrics['reward_critic']['overestimation_ratio'],
+                "Reward Value/UnderestimationRatio": critic_metrics['reward_critic']['underestimation_ratio'],
+                "Reward Value/MaxError": critic_metrics['reward_critic']['max_error'],
+                "Reward Value/PearsonCorr": critic_metrics['reward_critic']['pearson_corr'],
+                "Reward Value/SpearmanCorr": critic_metrics['reward_critic']['spearman_corr'],
+                "Reward Value/KendallCorr": critic_metrics['reward_critic']['kendall_corr'],
+                "Reward Value/MeanPredicted": critic_metrics['reward_critic']['mean_value'],
+                "Reward Value/StdPredicted": critic_metrics['reward_critic']['std_value'],
+                "Reward Value/MinPredicted": critic_metrics['reward_critic']['min_value'],
+                "Reward Value/MaxPredicted": critic_metrics['reward_critic']['max_value'],
+                "Reward Value/MeanMCReturn": critic_metrics['reward_critic']['mean_mc_return'],
+                "Reward Value/StdMCReturn": critic_metrics['reward_critic']['std_mc_return'],
+                "Reward Value/MinMCReturn": critic_metrics['reward_critic']['min_mc_return'],
+                "Reward Value/MaxMCReturn": critic_metrics['reward_critic']['max_mc_return'],
+                
+                # Cost critic metrics
+                "Cost Value/EstimationError": critic_metrics['cost_critic']['mean_error'],
+                "Cost Value/MeanAbsError": critic_metrics['cost_critic']['mean_abs_error'],
+                "Cost Value/OverestimationRatio": critic_metrics['cost_critic']['overestimation_ratio'],
+                "Cost Value/UnderestimationRatio": critic_metrics['cost_critic']['underestimation_ratio'],
+                "Cost Value/MaxError": critic_metrics['cost_critic']['max_error'],
+                "Cost Value/PearsonCorr": critic_metrics['cost_critic']['pearson_corr'],
+                "Cost Value/SpearmanCorr": critic_metrics['cost_critic']['spearman_corr'],
+                "Cost Value/KendallCorr": critic_metrics['cost_critic']['kendall_corr'],
+                "Cost Value/MeanPredicted": critic_metrics['cost_critic']['mean_value'],
+                "Cost Value/StdPredicted": critic_metrics['cost_critic']['std_value'],
+                "Cost Value/MinPredicted": critic_metrics['cost_critic']['min_value'],
+                "Cost Value/MaxPredicted": critic_metrics['cost_critic']['max_value'],
+                "Cost Value/MeanMCReturn": critic_metrics['cost_critic']['mean_mc_return'],
+                "Cost Value/StdMCReturn": critic_metrics['cost_critic']['std_mc_return'],
+                "Cost Value/MinMCReturn": critic_metrics['cost_critic']['min_mc_return'],
+                "Cost Value/MaxMCReturn": critic_metrics['cost_critic']['max_mc_return'],
+            }
+            
+            # Add discrepancy metrics if available (double critic enabled)
+            if 'reward_discrepancy' in critic_metrics:
+                log_dict.update({
+                    "CriticDiscrepancy/RewardMean": critic_metrics['reward_discrepancy']['mean_discrepancy'],
+                    "CriticDiscrepancy/RewardStd": critic_metrics['reward_discrepancy']['std_discrepancy'],
+                    "CriticDiscrepancy/RewardMeanAbs": critic_metrics['reward_discrepancy']['mean_abs_discrepancy'],
+                    "CriticDiscrepancy/RewardMax": critic_metrics['reward_discrepancy']['max_discrepancy'],
+                    "CriticDiscrepancy/RewardMin": critic_metrics['reward_discrepancy']['min_discrepancy'],
+                    "CriticDiscrepancy/RewardOverestimateRatio": critic_metrics['reward_discrepancy']['overestimate_ratio'],
+                    "CriticDiscrepancy/RewardUnderestimateRatio": critic_metrics['reward_discrepancy']['underestimate_ratio'],
+                    "CriticDiscrepancy/RewardMeanMain": critic_metrics['reward_discrepancy']['mean_main_value'],
+                    "CriticDiscrepancy/RewardMeanEval": critic_metrics['reward_discrepancy']['mean_eval_value'],
+                })
+            
+            if 'cost_discrepancy' in critic_metrics:
+                log_dict.update({
+                    "CriticDiscrepancy/CostMean": critic_metrics['cost_discrepancy']['mean_discrepancy'],
+                    "CriticDiscrepancy/CostStd": critic_metrics['cost_discrepancy']['std_discrepancy'],
+                    "CriticDiscrepancy/CostMeanAbs": critic_metrics['cost_discrepancy']['mean_abs_discrepancy'],
+                    "CriticDiscrepancy/CostMax": critic_metrics['cost_discrepancy']['max_discrepancy'],
+                    "CriticDiscrepancy/CostMin": critic_metrics['cost_discrepancy']['min_discrepancy'],
+                    "CriticDiscrepancy/CostOverestimateRatio": critic_metrics['cost_discrepancy']['overestimate_ratio'],
+                    "CriticDiscrepancy/CostUnderestimateRatio": critic_metrics['cost_discrepancy']['underestimate_ratio'],
+                    "CriticDiscrepancy/CostMeanMain": critic_metrics['cost_discrepancy']['mean_main_value'],
+                    "CriticDiscrepancy/CostMeanEval": critic_metrics['cost_discrepancy']['mean_eval_value'],
+                })
+            
+            logger.store(**log_dict)
 
             # Log plots to wandb
             if 'plot_fig' in critic_metrics['reward_critic']:
@@ -450,6 +485,19 @@ def main(args, cfg_env=None):
                 cost_img = wandb.Image(cost_fig)
                 wandb.log({"plots/cost_value_scatter": cost_img})
                 plt.close(cost_fig)
+            
+            # Log critic comparison plots if available
+            if 'reward_discrepancy' in critic_metrics and 'comparison_plot' in critic_metrics['reward_discrepancy']:
+                reward_comp_fig = critic_metrics['reward_discrepancy']['comparison_plot']
+                reward_comp_img = wandb.Image(reward_comp_fig)
+                wandb.log({"plots/reward_critic_comparison": reward_comp_img})
+                plt.close(reward_comp_fig)
+            
+            if 'cost_discrepancy' in critic_metrics and 'comparison_plot' in critic_metrics['cost_discrepancy']:
+                cost_comp_fig = critic_metrics['cost_discrepancy']['comparison_plot']
+                cost_comp_img = wandb.Image(cost_comp_fig)
+                wandb.log({"plots/cost_critic_comparison": cost_comp_img})
+                plt.close(cost_comp_fig)
 
         eval_end_time = time.time()
 
@@ -666,6 +714,8 @@ def main(args, cfg_env=None):
                 target_value_c_b,
             ) in dataloader:
                 risk_b = risk_b if args.use_risk else None 
+                
+                # Train main critics (used for policy updates)
                 reward_critic_optimizer.zero_grad()
                 loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b, risk_b), target_value_r_b)
                 cost_critic_optimizer.zero_grad()
@@ -679,14 +729,64 @@ def main(args, cfg_env=None):
                     if config.get("use_value_coefficient", False) \
                     else loss_r + loss_c
                 total_loss.backward()
-                clip_grad_norm_(policy.parameters(), config["max_grad_norm"])
+                clip_grad_norm_(policy.reward_critic.parameters(), config["max_grad_norm"])
+                clip_grad_norm_(policy.cost_critic.parameters(), config["max_grad_norm"])
                 reward_critic_optimizer.step()
                 cost_critic_optimizer.step()
+
+                # Train evaluation critics (NOT used for policy updates, just for discrepancy tracking)
+                reward_critic_eval_optimizer.zero_grad()
+                loss_r_eval = nn.functional.mse_loss(policy.reward_critic_eval(obs_b, risk_b), target_value_r_b)
+                cost_critic_eval_optimizer.zero_grad()
+                loss_c_eval = nn.functional.mse_loss(policy.cost_critic_eval(obs_b, risk_b), target_value_c_b)
+                if config.get("use_critic_norm", True):
+                    for param in policy.reward_critic_eval.parameters():
+                        loss_r_eval += param.pow(2).sum() * 0.001
+                    for param in policy.cost_critic_eval.parameters():
+                        loss_c_eval += param.pow(2).sum() * 0.001
+                total_loss_eval = 2*loss_r_eval + loss_c_eval \
+                    if config.get("use_value_coefficient", False) \
+                    else loss_r_eval + loss_c_eval
+                total_loss_eval.backward()
+                clip_grad_norm_(policy.reward_critic_eval.parameters(), config["max_grad_norm"])
+                clip_grad_norm_(policy.cost_critic_eval.parameters(), config["max_grad_norm"])
+                reward_critic_eval_optimizer.step()
+                cost_critic_eval_optimizer.step()
+
+                # Compute discrepancies between the two critics
+                with torch.no_grad():
+                    value_r_main = policy.reward_critic(obs_b, risk_b)
+                    value_c_main = policy.cost_critic(obs_b, risk_b)
+                    value_r_eval = policy.reward_critic_eval(obs_b, risk_b)
+                    value_c_eval = policy.cost_critic_eval(obs_b, risk_b)
+                    
+                    # Discrepancy = main_critic - eval_critic
+                    # Positive discrepancy for reward means main critic overestimates relative to eval
+                    # Positive discrepancy for cost means main critic overestimates relative to eval
+                    reward_discrepancy = value_r_main - value_r_eval
+                    cost_discrepancy = value_c_main - value_c_eval
+                    
+                    reward_discrepancy_mean = reward_discrepancy.mean().item()
+                    reward_discrepancy_std = reward_discrepancy.std().item()
+                    cost_discrepancy_mean = cost_discrepancy.mean().item()
+                    cost_discrepancy_std = cost_discrepancy.std().item()
+                    
+                    # Track overestimation/underestimation patterns
+                    reward_overestimate_ratio = (reward_discrepancy > 0).float().mean().item()
+                    cost_overestimate_ratio = (cost_discrepancy > 0).float().mean().item()
 
                 logger.store(
                     **{
                         "Loss/Loss_reward_critic": loss_r.mean().item(),
                         "Loss/Loss_cost_critic": loss_c.mean().item(),
+                        "Loss/Loss_reward_critic_eval": loss_r_eval.mean().item(),
+                        "Loss/Loss_cost_critic_eval": loss_c_eval.mean().item(),
+                        "CriticDiscrepancy/RewardMean": reward_discrepancy_mean,
+                        "CriticDiscrepancy/RewardStd": reward_discrepancy_std,
+                        "CriticDiscrepancy/CostMean": cost_discrepancy_mean,
+                        "CriticDiscrepancy/CostStd": cost_discrepancy_std,
+                        "CriticDiscrepancy/RewardOverestimateRatio": reward_overestimate_ratio,
+                        "CriticDiscrepancy/CostOverestimateRatio": cost_overestimate_ratio,
                     }
                 )
         update_end_time = time.time()
@@ -707,7 +807,7 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")
                 logger.log_tabular("Metrics/EvalEpLen")
-            if epoch % 20 == 0:
+            if True:
                 # Add critic evaluation metrics
                 logger.log_tabular("Reward Value/EstimationError")
                 logger.log_tabular("Reward Value/MeanAbsError") 
@@ -741,12 +841,30 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Cost Value/StdMCReturn")
                 logger.log_tabular("Cost Value/MinMCReturn")
                 logger.log_tabular("Cost Value/MaxMCReturn")
+                # Discrepancy metrics
+                logger.log_tabular("CriticDiscrepancy/RewardMean")
+                logger.log_tabular("CriticDiscrepancy/RewardStd")
+                logger.log_tabular("CriticDiscrepancy/RewardMeanAbs")
+                logger.log_tabular("CriticDiscrepancy/RewardOverestimateRatio")
+                logger.log_tabular("CriticDiscrepancy/RewardUnderestimateRatio")
+                logger.log_tabular("CriticDiscrepancy/RewardMeanMain")
+                logger.log_tabular("CriticDiscrepancy/RewardMeanEval")
+                logger.log_tabular("CriticDiscrepancy/CostMean")
+                logger.log_tabular("CriticDiscrepancy/CostStd")
+                logger.log_tabular("CriticDiscrepancy/CostMeanAbs")
+                logger.log_tabular("CriticDiscrepancy/CostOverestimateRatio")
+                logger.log_tabular("CriticDiscrepancy/CostUnderestimateRatio")
+                logger.log_tabular("CriticDiscrepancy/CostMeanMain")
+                logger.log_tabular("CriticDiscrepancy/CostMeanEval")
             logger.log_tabular("Train/Epoch", epoch + 1)
             logger.log_tabular("Train/TotalSteps", (epoch + 1) * args.steps_per_epoch)
             logger.log_tabular("Train/KL")
             logger.log_tabular("Loss/Loss_reward_critic")
             logger.log_tabular("Loss/Loss_cost_critic")
+            logger.log_tabular("Loss/Loss_reward_critic_eval")
+            logger.log_tabular("Loss/Loss_cost_critic_eval")
             logger.log_tabular("Loss/Loss_actor")
+            # Note: Discrepancy metrics are logged in the periodic section above (if True block)
             logger.log_tabular("Time/Rollout", rollout_end_time - rollout_start_time)
             if args.use_eval:
                 logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)

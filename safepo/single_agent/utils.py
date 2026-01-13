@@ -46,6 +46,11 @@ def rollout_policy(
         'value_c': []
     }
     
+    # Add eval critic data if double critic is enabled
+    if hasattr(policy, 'use_double_critic') and policy.use_double_critic:
+        episode_data['value_r_eval'] = []
+        episode_data['value_c_eval'] = []
+    
     num_envs = env.num_envs
     episodes_completed = 0
     
@@ -59,11 +64,19 @@ def rollout_policy(
         episode_obs = []
         episode_value_r = []
         episode_value_c = []
+        episode_value_r_eval = []
+        episode_value_c_eval = []
         
         for _ in range(max_ep_len):
             with torch.no_grad():
                 risk = torch.exp(risk_model(obs)) if use_risk else None
                 _, _, value_r, value_c = policy.step(obs, risk, deterministic=True)
+                
+                # Get eval critic values if double critic is enabled
+                if hasattr(policy, 'use_double_critic') and policy.use_double_critic:
+                    value_r_eval, value_c_eval = policy.get_eval_values(obs, risk)
+                    episode_value_r_eval.append(value_r_eval)
+                    episode_value_c_eval.append(value_c_eval)
             
             episode_obs.append(obs)
             episode_value_r.append(value_r)
@@ -91,6 +104,9 @@ def rollout_policy(
                     episode_data['obs'].append(torch.stack([o[env_idx] for o in episode_obs]))
                     episode_data['value_r'].append(torch.stack([vr[env_idx] for vr in episode_value_r]))
                     episode_data['value_c'].append(torch.stack([vc[env_idx] for vc in episode_value_c]))
+                    if hasattr(policy, 'use_double_critic') and policy.use_double_critic:
+                        episode_data['value_r_eval'].append(torch.stack([vr[env_idx] for vr in episode_value_r_eval]))
+                        episode_data['value_c_eval'].append(torch.stack([vc[env_idx] for vc in episode_value_c_eval]))
                     episodes_completed += 1
             
             if episodes_completed >= num_episodes:
@@ -218,6 +234,67 @@ def create_value_scatter_plot(
     
     return fig
 
+def create_critic_comparison_plot(
+    main_critic_values: torch.Tensor,
+    eval_critic_values: torch.Tensor,
+    title: str,
+    value_type: str = "Reward"
+) -> plt.Figure:
+    """
+    Create a scatter plot comparing predictions from main critic vs eval critic.
+    
+    Args:
+        main_critic_values: Tensor of values from main critic (used for policy updates)
+        eval_critic_values: Tensor of values from eval critic (not used for policy updates)
+        title: Plot title
+        value_type: Type of value being compared ("Reward" or "Cost")
+        
+    Returns:
+        matplotlib Figure object for wandb logging
+    """
+    # Convert to numpy
+    main_np = main_critic_values.detach().cpu().numpy().flatten()
+    eval_np = eval_critic_values.detach().cpu().numpy().flatten()
+    
+    # Calculate discrepancy
+    discrepancy = main_np - eval_np
+    mean_discrepancy = np.mean(discrepancy)
+    std_discrepancy = np.std(discrepancy)
+    
+    # Create figure
+    fig = plt.figure(figsize=(10, 8))
+    
+    # Create scatter plot with color coding by discrepancy
+    scatter = plt.scatter(main_np, eval_np, c=discrepancy, alpha=0.4, cmap='RdYlGn', s=10)
+    plt.colorbar(scatter, label='Discrepancy (Main - Eval)')
+    
+    # Add diagonal line (y=x) for perfect agreement
+    min_val = min(main_np.min(), eval_np.min())
+    max_val = max(main_np.max(), eval_np.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=2, label='Perfect Agreement (y=x)')
+    
+    # Calculate correlation
+    corr = calculate_correlation(main_critic_values, eval_critic_values)
+    
+    # Add title and labels
+    plt.title(f'{title}\nMean Discrepancy: {mean_discrepancy:.4f} ± {std_discrepancy:.4f}\n'
+              f'Pearson: {corr["pearson_corr"]:.3f}, Spearman: {corr["spearman_corr"]:.3f}')
+    plt.xlabel(f'Main Critic {value_type} Value (used for policy updates)', fontsize=11)
+    plt.ylabel(f'Eval Critic {value_type} Value (evaluation only)', fontsize=11)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Add text annotation about interpretation
+    if mean_discrepancy > 0:
+        bias_text = f'Main critic overestimates by {mean_discrepancy:.4f} on average'
+    else:
+        bias_text = f'Main critic underestimates by {abs(mean_discrepancy):.4f} on average'
+    
+    plt.text(0.05, 0.95, bias_text, transform=plt.gca().transAxes,
+             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    return fig
+
 def evaluate_value_estimation_error(
     value_estimates: torch.Tensor,
     monte_carlo_returns: torch.Tensor,
@@ -322,7 +399,8 @@ def evaluate_critic_performance_from_rollouts(
         create_plots: Whether to create scatter plots
         
     Returns:
-        Dictionary containing evaluation metrics for both reward and cost critics
+        Dictionary containing evaluation metrics for both reward and cost critics,
+        and discrepancy metrics if double critic is enabled
     """
     # Collect rollout data
     episode_data = rollout_policy(
@@ -354,10 +432,67 @@ def evaluate_critic_performance_from_rollouts(
         plot_title="Cost Value Estimates vs MC Returns"
     )
     
-    return {
+    result = {
         'reward_critic': reward_metrics,
         'cost_critic': cost_metrics
     }
+    
+    # Compute discrepancies between main and eval critics if double critic is enabled
+    if hasattr(policy, 'use_double_critic') and policy.use_double_critic and 'value_r_eval' in episode_data:
+        all_value_r_eval = torch.cat(episode_data['value_r_eval'])
+        all_value_c_eval = torch.cat(episode_data['value_c_eval'])
+        
+        # Discrepancy = main_critic - eval_critic
+        # Positive means main critic overestimates relative to eval critic
+        reward_discrepancy = all_value_r - all_value_r_eval
+        cost_discrepancy = all_value_c - all_value_c_eval
+        
+        reward_discrepancy_metrics = {
+            'mean_discrepancy': reward_discrepancy.mean().item(),
+            'std_discrepancy': reward_discrepancy.std().item(),
+            'mean_abs_discrepancy': torch.abs(reward_discrepancy).mean().item(),
+            'max_discrepancy': reward_discrepancy.max().item(),
+            'min_discrepancy': reward_discrepancy.min().item(),
+            'overestimate_ratio': (reward_discrepancy > 0).float().mean().item(),
+            'underestimate_ratio': (reward_discrepancy < 0).float().mean().item(),
+            'mean_main_value': all_value_r.mean().item(),
+            'mean_eval_value': all_value_r_eval.mean().item(),
+        }
+        
+        cost_discrepancy_metrics = {
+            'mean_discrepancy': cost_discrepancy.mean().item(),
+            'std_discrepancy': cost_discrepancy.std().item(),
+            'mean_abs_discrepancy': torch.abs(cost_discrepancy).mean().item(),
+            'max_discrepancy': cost_discrepancy.max().item(),
+            'min_discrepancy': cost_discrepancy.min().item(),
+            'overestimate_ratio': (cost_discrepancy > 0).float().mean().item(),
+            'underestimate_ratio': (cost_discrepancy < 0).float().mean().item(),
+            'mean_main_value': all_value_c.mean().item(),
+            'mean_eval_value': all_value_c_eval.mean().item(),
+        }
+        
+        # Create comparison scatter plots
+        if create_plots:
+            reward_comparison_fig = create_critic_comparison_plot(
+                all_value_r,
+                all_value_r_eval,
+                title=f"Reward Critic Comparison: Main vs Eval",
+                value_type="Reward"
+            )
+            reward_discrepancy_metrics['comparison_plot'] = reward_comparison_fig
+            
+            cost_comparison_fig = create_critic_comparison_plot(
+                all_value_c,
+                all_value_c_eval,
+                title=f"Cost Critic Comparison: Main vs Eval",
+                value_type="Cost"
+            )
+            cost_discrepancy_metrics['comparison_plot'] = cost_comparison_fig
+        
+        result['reward_discrepancy'] = reward_discrepancy_metrics
+        result['cost_discrepancy'] = cost_discrepancy_metrics
+    
+    return result
 
 # Keep the original functions for backward compatibility
 def calculate_monte_carlo_returns(

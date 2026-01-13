@@ -189,12 +189,17 @@ class ActorVCritic(nn.Module):
         value_estimate = actor_critic.get_value(observation)
     """
 
-    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, use_double_critic=False):
         super().__init__()
         self.use_risk = use_risk
+        self.use_double_critic = use_double_critic
         self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
         self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
         self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+        # Second critics for evaluation only (not used for policy updates)
+        if use_double_critic:
+            self.reward_critic_eval = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+            self.cost_critic_eval = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
 
     def get_value(self, obs, risk=None):
         """
@@ -240,6 +245,28 @@ class ActorVCritic(nn.Module):
             value_r = self.reward_critic(obs)
             value_c = self.cost_critic(obs)
         return action, log_prob, value_r, value_c
+    
+    def get_eval_values(self, obs, risk=None):
+        """
+        Get value estimates from the evaluation critics (not used for policy updates).
+        
+        Args:
+            obs (torch.Tensor): Input observation tensor.
+            risk (torch.Tensor, optional): Risk tensor if use_risk is True.
+            
+        Returns:
+            tuple: Tuple containing reward value estimate and cost value estimate from eval critics.
+        """
+        if not self.use_double_critic:
+            raise ValueError("Double critic not enabled. Set use_double_critic=True in __init__")
+        
+        if self.use_risk:
+            value_r_eval = self.reward_critic_eval(obs, risk)
+            value_c_eval = self.cost_critic_eval(obs, risk)
+        else:
+            value_r_eval = self.reward_critic_eval(obs)
+            value_c_eval = self.cost_critic_eval(obs)
+        return value_r_eval, value_c_eval
 
 class MultiAgentActor(nn.Module):
     """

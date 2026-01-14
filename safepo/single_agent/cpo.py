@@ -37,7 +37,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import matplotlib.pyplot as plt
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
+from safepo.common.env import make_sa_safetygym_env, make_sa_gymrobot_env, make_sa_isaac_env
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic, RiskEst
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
@@ -160,6 +160,13 @@ def fvp(
 
     return flat_grad_grad_kl + params * 0.1
 
+def env_fn(env_id):
+    if "Safety" in env_id:
+        return make_sa_safetygym_env
+    else:
+        return make_sa_gymrobot_env
+
+
 
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
@@ -172,17 +179,15 @@ def main(args, cfg_env=None):
 
 
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
+        env, obs_space, act_space = env_fn(args.task)(
             args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        # eval_env, obs_space, act_space = make_sa_mujoco_env(
-        #     args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
-        # )
+        eval_env, _, _ = env_fn(args.task)(args, num_envs=1, env_id=args.task, seed=None)
         config = default_cfg
 
     else:
-        sim_params = parse_sim_params(args, cfg_env, None)
-        env = make_sa_isaac_env(args=args, cfg=cfg_env, sim_params=sim_params)
+        sim_params = parse_sim_params(cfg_env, None)
+        env = make_sa_isaac_env(cfg=cfg_env, sim_params=sim_params)
         eval_env = env
         obs_space = env.observation_space
         act_space = env.action_space
@@ -259,8 +264,33 @@ def main(args, cfg_env=None):
     total_cost, eval_total_cost = 0, 0
     f_next_obs, f_costs = None, None
 
+
+    
     # training loop
     for epoch in range(epochs):
+        # adjust max episode steps for curriculum learning
+        if args.dynamic_steps:
+            bin_size = epochs / args.curriculum_bins
+            bin_num = np.clip(int(epoch / bin_size), 0, args.curriculum_bins - 1)
+            max_episode_steps = int(args.max_episode_steps * (bin_num+1) / args.curriculum_bins)
+            print(f"Current Epoch: {epoch}, Bin Num: {bin_num}, Max Episode Steps: {max_episode_steps}")
+            if args.task not in isaac_gym_map.keys():
+                env, obs_space, act_space = env_fn(args.task)(
+                    args, num_envs=args.num_envs, env_id=args.task, seed=args.seed, max_episode_steps=max_episode_steps
+                )
+                eval_env, _, _ = env_fn(args.task)(args, num_envs=1, env_id=args.task, seed=None)
+                config = default_cfg
+
+            else:
+                sim_params = parse_sim_params(cfg_env, None)
+                env = make_sa_isaac_env(cfg=cfg_env, sim_params=sim_params)
+                eval_env = env
+                obs_space = env.observation_space
+                act_space = env.action_space
+                args.num_envs = env.num_envs
+                config = isaac_gym_specific_cfg
+
+
         rollout_start_time = time.time()
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
@@ -268,8 +298,17 @@ def main(args, cfg_env=None):
                 risk = torch.exp(risk_train.model(obs)) if args.use_risk else None
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
-            next_obs, reward, cost, terminated, truncated, info = env.step(action)
-
+            if "Safe" in args.task:
+                next_obs, reward, cost, terminated, truncated, info = env.step(action)
+                success = 0
+            else:
+                next_obs, reward, terminated, truncated, info = env.step(action)
+                try:
+                    cost = info["cost"]
+                    success = info["success"]
+                except:
+                    cost = terminated
+                    success = 0
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
@@ -392,6 +431,7 @@ def main(args, cfg_env=None):
         if True:
             # Evaluate critic performance using fresh rollouts
             critic_metrics = evaluate_critic_performance_from_rollouts(
+                args=args,
                 policy=policy,
                 env=env,
                 num_episodes=eval_episodes,

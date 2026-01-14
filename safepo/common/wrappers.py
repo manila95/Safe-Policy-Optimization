@@ -65,6 +65,19 @@ try:
 except NameError:
     pass
 
+
+
+class SafeGymNormalizeObservation(NormalizeObservation):
+    """This wrapper will normalize observations as Gymnasium's NormalizeObservation wrapper does."""
+
+    def step(self, action):
+        """Steps through the environment and normalizes the observation."""
+        obs, rews, terminateds, truncateds, infos = self.env.step(action)
+        obs = self.normalize(obs) if self.is_vector_env else self.normalize(np.array([obs]))[0]
+        return obs, rews, terminateds, truncateds, infos
+
+
+
 class MultiGoalEnv():
     
     def __init__(

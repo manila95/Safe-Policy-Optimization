@@ -247,15 +247,16 @@ def main(args, cfg_env=None):
     epochs = total_steps // steps_per_epoch
     
     # Create augmented observation space with 2 additional dimensions
-    augmented_obs_dim = obs_space.shape[0] + 2
+    # augmented_obs_dim = obs_space.shape[0] + 2
     
     # create the actor-critic module with augmented observation dimension
     policy = ActorVCritic(
-        obs_dim=augmented_obs_dim,
+        obs_dim=obs_space.shape[0]+2,
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
         use_risk=args.use_risk,
         risk_size=risk_size,
+        augment_obs=args.augment_obs,
     ).to(device)
     reward_critic_optimizer = torch.optim.Adam(
         policy.reward_critic.parameters(), lr=1e-3
@@ -295,7 +296,7 @@ def main(args, cfg_env=None):
     buffer = VectorizedOnPolicyBuffer(
         obs_space=gymnasium.spaces.Box(low=np.concatenate([obs_space.low, [-np.inf, -np.inf]]), 
                                   high=np.concatenate([obs_space.high, [np.inf, np.inf]]), 
-                                  shape=(augmented_obs_dim,)),
+                                  shape=(obs_space.shape[0]+2,)),
         act_space=act_space,
         size=local_steps_per_epoch,
         device=device,
@@ -351,7 +352,7 @@ def main(args, cfg_env=None):
             # Augment observation with episode information
             augmented_obs = augment_observation_with_episode_info(
                 obs, ep_cost, ep_len, args.cost_limit
-            )
+            ) if args.augment_obs else obs
             
             with torch.no_grad():
                     risk = risk_model(augmented_obs) if args.use_risk and risk_model is not None else None
@@ -406,7 +407,7 @@ def main(args, cfg_env=None):
                 final_risk = risk_model(info["final_observation"]) if args.use_risk and risk_model is not None else None
 
 
-            buffer.store(
+            buffer.store(   
                 obs=augmented_obs,
                 act=act,
                 reward=reward,

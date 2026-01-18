@@ -37,7 +37,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import matplotlib.pyplot as plt
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
+from safepo.common.env import make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic, RiskEst
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
@@ -161,6 +161,14 @@ def fvp(
     return flat_grad_grad_kl + params * 0.1
 
 
+def env_fn(env_id):
+    if "Safety" in env_id:
+        return make_sa_safetygym_env
+    else:
+        return make_sa_gymrobot_env
+
+
+
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
     random.seed(args.seed)
@@ -172,23 +180,20 @@ def main(args, cfg_env=None):
 
 
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
+        env, obs_space, act_space = env_fn(args.task)(
             args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        # eval_env, obs_space, act_space = make_sa_mujoco_env(
-        #     args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
-        # )
+        eval_env, _, _ = env_fn(args.task)(args, num_envs=1, env_id=args.task, seed=None)
         config = default_cfg
 
     else:
-        sim_params = parse_sim_params(args, cfg_env, None)
-        env = make_sa_isaac_env(args=args, cfg=cfg_env, sim_params=sim_params)
+        sim_params = parse_sim_params(cfg_env, None)
+        env = make_sa_isaac_env(cfg=cfg_env, sim_params=sim_params)
         eval_env = env
         obs_space = env.observation_space
         act_space = env.action_space
         args.num_envs = env.num_envs
         config = isaac_gym_specific_cfg
-
     # set training steps
     steps_per_epoch = config.get("steps_per_epoch", args.steps_per_epoch)
     total_steps = config.get("total_steps", args.total_steps)
@@ -268,8 +273,17 @@ def main(args, cfg_env=None):
                 risk = torch.exp(risk_train.model(obs)) if args.use_risk else None
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
-            next_obs, reward, cost, terminated, truncated, info = env.step(action)
-
+            if "Safe" in args.task:
+                next_obs, reward, cost, terminated, truncated, info = env.step(action)
+                success = 0
+            else:
+                next_obs, reward, terminated, truncated, info = env.step(action)
+                try:
+                    cost = info["cost"]
+                    success = info["success"]
+                except:
+                    cost = terminated
+                    success = 0 
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
@@ -392,6 +406,7 @@ def main(args, cfg_env=None):
         if True:
             # Evaluate critic performance using fresh rollouts
             critic_metrics = evaluate_critic_performance_from_rollouts(
+                args=args,
                 policy=policy,
                 env=env,
                 num_episodes=eval_episodes,

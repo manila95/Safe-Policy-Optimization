@@ -7,6 +7,7 @@ import seaborn as sns
 from scipy import stats
 
 def rollout_policy(
+    args,
     policy: ActorVCritic,
     env,
     num_episodes: int,
@@ -83,9 +84,20 @@ def rollout_policy(
             episode_value_c.append(value_c)
             
             action = policy.actor(obs, risk).sample()
-            next_obs, reward, cost, terminated, truncated, _ = env.step(
-                action.detach().cpu().numpy()
-            )
+            # Vector envs expect numpy actions; avoid numpy * Tensor type errors.
+            action_np = action.detach().cpu().numpy()
+
+            if "Safe" in args.task:
+                next_obs, reward, cost, terminated, truncated, info = env.step(action_np)
+                success = 0
+            else:
+                next_obs, reward, terminated, truncated, info = env.step(action_np)
+                try:
+                    cost = info["cost"]
+                    success = info["success"]
+                except:
+                    cost = terminated
+                    success = 0 
             
             episode_rewards.append(torch.as_tensor(reward, dtype=torch.float32, device=device))
             episode_costs.append(torch.as_tensor(cost, dtype=torch.float32, device=device))
@@ -118,7 +130,7 @@ def rollout_policy(
         if episodes_completed >= num_episodes:
             break
             
-    print(torch.sum(torch.stack(episode_data["costs"])))
+    # print(torch.sum(torch.stack(episode_data["costs"])))
     return episode_data
 
 def calculate_monte_carlo_returns_from_rollouts(
@@ -374,6 +386,7 @@ def evaluate_value_estimation_error(
     return result
 
 def evaluate_critic_performance_from_rollouts(
+    args,
     policy: ActorVCritic,
     env,
     num_episodes: int,
@@ -404,7 +417,7 @@ def evaluate_critic_performance_from_rollouts(
     """
     # Collect rollout data
     episode_data = rollout_policy(
-        policy, env, num_episodes, max_ep_len, device, use_risk, risk_model
+        args, policy, env, num_episodes, max_ep_len, device, use_risk, risk_model
     )
     
     # Calculate Monte Carlo returns

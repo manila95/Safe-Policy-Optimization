@@ -142,15 +142,20 @@ class VCritic(nn.Module):
         value_estimate = critic(observation)
     """
 
-    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+    def __init__(self, obs_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, timestep_aug=False):
         super().__init__()
         self.use_risk = use_risk
+        self.timestep_aug = timestep_aug
         if self.use_risk:
+            obs_dim = obs_dim-2 if timestep_aug else obs_dim
             self.critic = build_risk_mlp_network([obs_dim]+hidden_sizes+[1], risk_size)
         else:
+            obs_dim = obs_dim-2 if timestep_aug else obs_dim
             self.critic = build_mlp_network([obs_dim]+hidden_sizes+[1])
 
     def forward(self, obs, risk=None):
+        if self.timestep_aug:
+            obs = obs[:, :-2]
         if self.use_risk:
             return torch.squeeze(self.critic(obs, risk), -1)
         else:
@@ -177,11 +182,11 @@ class ActorVCritic(nn.Module):
         value_estimate = actor_critic.get_value(observation)
     """
 
-    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, timestep_aug=False):
         super().__init__()
         self.use_risk = use_risk
-        self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
-        self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+        self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, timestep_aug=timestep_aug)
+        self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size, timestep_aug=timestep_aug)
         self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
 
     def get_value(self, obs, risk=None):

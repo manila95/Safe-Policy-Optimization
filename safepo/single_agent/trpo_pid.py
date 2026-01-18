@@ -42,6 +42,7 @@ from safepo.common.lagrange import PIDLagrangian as Lagrange
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
+import gymnasium as gym
 # from src.models.risk_models import *
 # from src.datasets.risk_datasets import *
 # from src.utils import * 
@@ -206,11 +207,12 @@ def main(args, cfg_env=None):
     epochs = total_steps // steps_per_epoch
     # create the actor-critic module
     policy = ActorVCritic(
-        obs_dim=obs_space.shape[0],
+        obs_dim=obs_space.shape[0]+2 if args.timestep_aug else obs_space.shape[0],
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
         use_risk=args.use_risk,
         risk_size=risk_size,
+        timestep_aug=args.timestep_aug,
     ).to(device)
     reward_critic_optimizer = torch.optim.Adam(
         policy.reward_critic.parameters(), lr=1e-3
@@ -244,7 +246,9 @@ def main(args, cfg_env=None):
 
     # create the vectorized on-policy buffer
     buffer = VectorizedOnPolicyBuffer(
-        obs_space=obs_space,
+        obs_space=gym.spaces.Box(low=np.concatenate([obs_space.low, [-np.inf, -np.inf]]), 
+                                  high=np.concatenate([obs_space.high, [np.inf, np.inf]]), 
+                                  shape=(obs_space.shape[0]+2 if args.timestep_aug else obs_space.shape[0],)),
         act_space=act_space,
         size=local_steps_per_epoch,
         device=device,
@@ -296,12 +300,19 @@ def main(args, cfg_env=None):
         # collect samples until we have enough to update
         for steps in range(local_steps_per_epoch):
             global_step += 1
+            if args.timestep_aug:
+                rem_cost = args.cost_limit - ep_cost
+                steps_aug = np.full_like(rem_cost, global_step)
+                obs = np.concatenate([obs, np.array([[steps_aug, rem_cost]]).reshape(-1, 2)], axis=-1)
+                obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
+                
             with torch.no_grad():
                     risk = risk_model(obs) if args.use_risk else None
                     act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)
 
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
+
 
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
@@ -360,6 +371,7 @@ def main(args, cfg_env=None):
             )
 
             obs = next_obs
+
             risk = risk_model(obs) if args.use_risk else None
             epoch_end = steps >= local_steps_per_epoch - 1
             for idx, (done, time_out) in enumerate(zip(terminated, truncated)):
@@ -370,17 +382,20 @@ def main(args, cfg_env=None):
                         if epoch_end:
                             with torch.no_grad():
                                 risk_idx = risk[idx] if args.use_risk else None
+                                obs_idx = torch.cat([obs[idx].reshape(1, -1), torch.tensor([[global_step, args.cost_limit - ep_cost[idx]]])], dim=-1).float() if args.timestep_aug else obs[idx]
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    obs[idx], risk_idx, deterministic=False
+                                    obs_idx, risk_idx, deterministic=False
                                 )
                         if time_out:
                             with torch.no_grad():
                                 final_risk_idx = final_risk[idx] if args.use_risk else None 
+                                # print(info["final_observation"][idx].reshape(1, -1).shape, np.array([[global_step, args.cost_limit - ep_cost[idx]]]).shape)
+                                obs_idx = torch.cat([info["final_observation"][idx].reshape(1, -1), torch.tensor([[global_step, args.cost_limit - ep_cost[idx]]])], dim=-1).float() if args.timestep_aug else info["final_observation"][idx]
                                 _, _, last_value_r, last_value_c = policy.step(
-                                    info["final_observation"][idx], final_risk_idx, deterministic=False
+                                    obs_idx, final_risk_idx, deterministic=False
                                 )
-                        last_value_r = last_value_r.unsqueeze(0)
-                        last_value_c = last_value_c.unsqueeze(0)
+                        last_value_r = last_value_r.squeeze().unsqueeze(0)
+                        last_value_c = last_value_c.squeeze().unsqueeze(0)
                     if done or time_out:
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
@@ -404,6 +419,7 @@ def main(args, cfg_env=None):
                         ep_cost[idx] = 0.0
                         ep_len[idx] = 0.0
                         logger.logged = False
+                        global_step = 0
 
                     buffer.finish_path(
                         last_value_r=last_value_r, last_value_c=last_value_c, idx=idx

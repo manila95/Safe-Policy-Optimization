@@ -212,7 +212,9 @@ def calculate_correlation(
 def create_value_scatter_plot(
     value_estimates: torch.Tensor,
     monte_carlo_returns: torch.Tensor,
-    title: str
+    title: str,
+    color_values: Optional[torch.Tensor] = None,
+    color_label: str = ""
 ) -> plt.Figure:
     """
     Create a scatter plot comparing value estimates and MC returns.
@@ -228,12 +230,23 @@ def create_value_scatter_plot(
     # Convert to numpy
     values_np = value_estimates.detach().cpu().numpy().flatten()
     returns_np = monte_carlo_returns.detach().cpu().numpy().flatten()
+    color_np = (
+        color_values.detach().cpu().numpy().flatten()
+        if color_values is not None
+        else None
+    )
     
     # Create figure
     fig = plt.figure(figsize=(10, 8))
     
-    # Create scatter plot with regression line
-    plt.scatter(returns_np, values_np, alpha=0.2)
+    # Create scatter plot with optional color coding
+    if color_np is not None:
+        scatter = plt.scatter(
+            returns_np, values_np, c=color_np, alpha=0.25, cmap="coolwarm", s=10
+        )
+        plt.colorbar(scatter, label=color_label or "Value Discrepancy (Main - Eval)")
+    else:
+        plt.scatter(returns_np, values_np, alpha=0.2)
     
     # Calculate correlations
     corr = calculate_correlation(value_estimates, monte_carlo_returns)
@@ -312,7 +325,9 @@ def evaluate_value_estimation_error(
     monte_carlo_returns: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
     create_plot: bool = False,
-    plot_title: str = ""
+    plot_title: str = "",
+    color_values: Optional[torch.Tensor] = None,
+    color_label: str = ""
 ) -> Dict[str, float]:
     """
     Calculate metrics to evaluate value function estimation bias.
@@ -330,6 +345,8 @@ def evaluate_value_estimation_error(
     if mask is not None:
         value_estimates = value_estimates[mask]
         monte_carlo_returns = monte_carlo_returns[mask]
+        if color_values is not None:
+            color_values = color_values[mask]
     
     # Calculate errors
     errors = value_estimates - monte_carlo_returns
@@ -355,7 +372,9 @@ def evaluate_value_estimation_error(
         plot_fig = create_value_scatter_plot(
             value_estimates,
             monte_carlo_returns,
-            plot_title
+            plot_title,
+            color_values=color_values,
+            color_label=color_label
         )
     
     # Calculate value statistics
@@ -371,6 +390,7 @@ def evaluate_value_estimation_error(
     }
     
     result = {
+        'error': errors,
         'mean_error': mean_error,
         'mean_abs_error': mean_abs_error,
         'overestimation_ratio': overestimation_ratio,
@@ -428,13 +448,28 @@ def evaluate_critic_performance_from_rollouts(
     all_value_c = torch.cat(episode_data['value_c'])
     all_reward_returns = torch.cat(returns['reward_returns'])
     all_cost_returns = torch.cat(returns['cost_returns'])
+
+    # Optional discrepancy for color-coding if double critic is enabled
+    reward_color_values = None
+    cost_color_values = None
+    if hasattr(policy, 'use_double_critic') and policy.use_double_critic and 'value_r_eval' in episode_data:
+        all_value_r_eval = torch.cat(episode_data['value_r_eval'])
+        all_value_c_eval = torch.cat(episode_data['value_c_eval'])
+        reward_color_values = torch.abs(all_value_r - all_value_r_eval)
+        cost_color_values = torch.abs(all_value_c - all_value_c_eval)
     
+
+
+
+
     # Evaluate reward critic
     reward_metrics = evaluate_value_estimation_error(
         all_value_r,
         all_reward_returns,
         create_plot=create_plots,
-        plot_title="Reward Value Estimates vs MC Returns"
+        plot_title="Reward Value Estimates vs MC Returns",
+        color_values=reward_color_values,
+        color_label="Reward Discrepancy |Main - Eval|"
     )
     
     # Evaluate cost critic
@@ -442,9 +477,17 @@ def evaluate_critic_performance_from_rollouts(
         all_value_c,
         all_cost_returns,
         create_plot=create_plots,
-        plot_title="Cost Value Estimates vs MC Returns"
+        plot_title="Cost Value Estimates vs MC Returns",
+        color_values=cost_color_values,
+        color_label="Cost Discrepancy |Main - Eval|"
     )
     
+    # Calculate correlation between std and estimation error
+    reward_std_error_corr = calculate_correlation(reward_color_values, reward_metrics['error'])
+    cost_std_error_corr = calculate_correlation(cost_color_values, cost_metrics['error'])
+
+    reward_metrics['std_error_corr'] = reward_std_error_corr
+    cost_metrics['std_error_corr'] = cost_std_error_corr
     result = {
         'reward_critic': reward_metrics,
         'cost_critic': cost_metrics
@@ -452,8 +495,6 @@ def evaluate_critic_performance_from_rollouts(
     
     # Compute discrepancies between main and eval critics if double critic is enabled
     if hasattr(policy, 'use_double_critic') and policy.use_double_critic and 'value_r_eval' in episode_data:
-        all_value_r_eval = torch.cat(episode_data['value_r_eval'])
-        all_value_c_eval = torch.cat(episode_data['value_c_eval'])
         
         # Discrepancy = main_critic - eval_critic
         # Positive means main critic overestimates relative to eval critic

@@ -437,6 +437,7 @@ def main(args, cfg_env=None):
                 "Reward Value/StdMCReturn": critic_metrics['reward_critic']['std_mc_return'],
                 "Reward Value/MinMCReturn": critic_metrics['reward_critic']['min_mc_return'],
                 "Reward Value/MaxMCReturn": critic_metrics['reward_critic']['max_mc_return'],
+                "Reward Value/StdErrorCorr": critic_metrics['reward_critic']['std_error_corr']['pearson_corr'],
                 
                 # Cost critic metrics
                 "Cost Value/EstimationError": critic_metrics['cost_critic']['mean_error'],
@@ -455,6 +456,7 @@ def main(args, cfg_env=None):
                 "Cost Value/StdMCReturn": critic_metrics['cost_critic']['std_mc_return'],
                 "Cost Value/MinMCReturn": critic_metrics['cost_critic']['min_mc_return'],
                 "Cost Value/MaxMCReturn": critic_metrics['cost_critic']['max_mc_return'],
+                "Cost Value/StdErrorCorr": critic_metrics['cost_critic']['std_error_corr']['pearson_corr'],
             }
             
             # Add discrepancy metrics if available (double critic enabled)
@@ -840,6 +842,7 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Reward Value/MaxMCReturn")
                 logger.log_tabular("Reward Value/MinPredicted")
                 logger.log_tabular("Reward Value/MaxPredicted")
+                logger.log_tabular("Reward Value/StdErrorCorr")
                 logger.log_tabular("Cost Value/EstimationError")
                 logger.log_tabular("Cost Value/MeanAbsError")
                 logger.log_tabular("Cost Value/OverestimationRatio")
@@ -856,6 +859,7 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Cost Value/StdMCReturn")
                 logger.log_tabular("Cost Value/MinMCReturn")
                 logger.log_tabular("Cost Value/MaxMCReturn")
+                logger.log_tabular("Cost Value/StdErrorCorr")
                 # Discrepancy metrics
                 logger.log_tabular("CriticDiscrepancy/RewardMean")
                 logger.log_tabular("CriticDiscrepancy/RewardStd")

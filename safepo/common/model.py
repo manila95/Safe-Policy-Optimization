@@ -181,7 +181,9 @@ class ActorVCritic(nn.Module):
         super().__init__()
         self.use_risk = use_risk
         self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+        self.reward_critic_v2 = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
         self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
+        self.cost_critic_v2 = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
         self.actor = Actor(obs_dim, act_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
 
     def get_value(self, obs, risk=None):
@@ -223,10 +225,18 @@ class ActorVCritic(nn.Module):
         log_prob = dist.log_prob(action).sum(axis=-1)
         if self.use_risk:
             value_r = self.reward_critic(obs, risk)
+            value_r_v2 = self.reward_critic_v2(obs, risk)
             value_c = self.cost_critic(obs, risk)
+            value_c_v2 = self.cost_critic_v2(obs, risk)
+            value_r = torch.min(value_r, value_r_v2)
+            value_c = torch.max(value_c, value_c_v2)
         else:
             value_r = self.reward_critic(obs)
             value_c = self.cost_critic(obs)
+            value_r_v2 = self.reward_critic_v2(obs)
+            value_c_v2 = self.cost_critic_v2(obs)
+            value_r = torch.min(value_r, value_r_v2)
+            value_c = torch.max(value_c, value_c_v2)
         return action, log_prob, value_r, value_c
 
 class MultiAgentActor(nn.Module):

@@ -242,7 +242,7 @@ def create_value_scatter_plot(
     # Create scatter plot with optional color coding
     if color_np is not None:
         scatter = plt.scatter(
-            returns_np, values_np, c=color_np, alpha=0.25, cmap="coolwarm", s=10
+            returns_np, values_np, c=color_np, alpha=0.25, cmap="turbo", s=10
         )
         plt.colorbar(scatter, label=color_label or "Value Discrepancy (Main - Eval)")
     else:
@@ -290,7 +290,7 @@ def create_critic_comparison_plot(
     fig = plt.figure(figsize=(10, 8))
     
     # Create scatter plot with color coding by discrepancy
-    scatter = plt.scatter(main_np, eval_np, c=discrepancy, alpha=0.4, cmap='RdYlGn', s=10)
+    scatter = plt.scatter(main_np, eval_np, c=discrepancy, alpha=0.4, cmap='seismic', s=10)
     plt.colorbar(scatter, label='Discrepancy (Main - Eval)')
     
     # Add diagonal line (y=x) for perfect agreement

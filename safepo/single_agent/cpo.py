@@ -38,10 +38,11 @@ from safepo.common.buffer import VectorizedOnPolicyBuffer
 from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
+from safepo.single_agent.utils import *
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
-from src.models.risk_models import *
-from src.datasets.risk_datasets import *
-from src.utils import * 
+#from src.models.risk_models import *
+#from src.datasets.risk_datasets import *
+#from src.utils import * 
 
 STEP_FRACTION=0.8
 CPO_SEARCHING_STEPS=15
@@ -173,8 +174,8 @@ def main(args, cfg_env=None):
 
     import wandb
     #wandb.login(key="7fd30ee0915aa367ca41345b56bd4fba756ca55a")
-    run = wandb.init(config=vars(args), entity="kaustubh_umontreal",
-                project="risk_aware_exploration",
+    run = wandb.init(config=vars(args), entity="kaustubh95",
+                project="calibration_rl",
                 monitor_gym=True,
                 sync_tensorboard=True, save_code=True)
 
@@ -435,6 +436,78 @@ def main(args, cfg_env=None):
 
         eval_end_time = time.time()
 
+
+        if epoch % 10 == 0:
+            # Evaluate critic performance using fresh rollouts
+            critic_metrics = evaluate_critic_performance_from_rollouts(
+                args=args,
+                policy=policy,
+                env=env,
+                num_episodes=eval_episodes,
+                max_ep_len=1000,  # Maximum episode length
+                device=device,
+                gamma=config['gamma'],
+                use_risk=args.use_risk,
+                risk_model=risk_train.model if args.use_risk else None,
+                create_plots=True
+            )
+
+            # Log the critic evaluation metrics
+            logger.store(
+                **{
+                    # Reward critic metrics
+                    "Reward Value/EstimationError": critic_metrics['reward_critic']['mean_error'],
+                    "Reward Value/MeanAbsError": critic_metrics['reward_critic']['mean_abs_error'],
+                    "Reward Value/OverestimationRatio": critic_metrics['reward_critic']['overestimation_ratio'],
+                    "Reward Value/UnderestimationRatio": critic_metrics['reward_critic']['underestimation_ratio'],
+                    "Reward Value/MaxError": critic_metrics['reward_critic']['max_error'],
+                    "Reward Value/PearsonCorr": critic_metrics['reward_critic']['pearson_corr'],
+                    "Reward Value/SpearmanCorr": critic_metrics['reward_critic']['spearman_corr'],
+                    "Reward Value/KendallCorr": critic_metrics['reward_critic']['kendall_corr'],
+                    "Reward Value/MeanPredicted": critic_metrics['reward_critic']['mean_value'],
+                    "Reward Value/StdPredicted": critic_metrics['reward_critic']['std_value'],
+                    "Reward Value/MinPredicted": critic_metrics['reward_critic']['min_value'],
+                    "Reward Value/MaxPredicted": critic_metrics['reward_critic']['max_value'],
+                    "Reward Value/MeanMCReturn": critic_metrics['reward_critic']['mean_mc_return'],
+                    "Reward Value/StdMCReturn": critic_metrics['reward_critic']['std_mc_return'],
+                    "Reward Value/MinMCReturn": critic_metrics['reward_critic']['min_mc_return'],
+                    "Reward Value/MaxMCReturn": critic_metrics['reward_critic']['max_mc_return'],
+
+                    # Cost critic metrics
+                    "Cost Value/EstimationError": critic_metrics['cost_critic']['mean_error'],
+                    "Cost Value/MeanAbsError": critic_metrics['cost_critic']['mean_abs_error'],
+                    "Cost Value/OverestimationRatio": critic_metrics['cost_critic']['overestimation_ratio'],
+                    "Cost Value/UnderestimationRatio": critic_metrics['cost_critic']['underestimation_ratio'],
+                    "Cost Value/MaxError": critic_metrics['cost_critic']['max_error'],
+                    "Cost Value/PearsonCorr": critic_metrics['cost_critic']['pearson_corr'],
+                    "Cost Value/SpearmanCorr": critic_metrics['cost_critic']['spearman_corr'],
+                    "Cost Value/KendallCorr": critic_metrics['cost_critic']['kendall_corr'],
+                    "Cost Value/MeanPredicted": critic_metrics['cost_critic']['mean_value'],
+                    "Cost Value/StdPredicted": critic_metrics['cost_critic']['std_value'],
+                    "Cost Value/MinPredicted": critic_metrics['cost_critic']['min_value'],
+                    "Cost Value/MaxPredicted": critic_metrics['cost_critic']['max_value'],
+                    "Cost Value/MeanMCReturn": critic_metrics['cost_critic']['mean_mc_return'],
+                    "Cost Value/StdMCReturn": critic_metrics['cost_critic']['std_mc_return'],
+                    "Cost Value/MinMCReturn": critic_metrics['cost_critic']['min_mc_return'],
+                    "Cost Value/MaxMCReturn": critic_metrics['cost_critic']['max_mc_return'],
+                }
+            )
+
+            # Log plots to wandb
+            if 'plot_fig' in critic_metrics['reward_critic']:
+                # Convert matplotlib figure to image
+                reward_fig = critic_metrics['reward_critic']['plot_fig']
+                reward_img = wandb.Image(reward_fig)
+                wandb.log({"plots/reward_value_scatter": reward_img})
+                plt.close(reward_fig)
+
+            if 'plot_fig' in critic_metrics['cost_critic']:
+                # Convert matplotlib figure to image
+                cost_fig = critic_metrics['cost_critic']['plot_fig']
+                cost_img = wandb.Image(cost_fig)
+                wandb.log({"plots/cost_value_scatter": cost_img})
+                plt.close(cost_fig)
+
         ## Risk Fine Tuning before the policy is updated
         if False: #args.use_risk and args.fine_tune_risk:
             risk_data = rb.sample(args.num_risk_samples)
@@ -688,6 +761,40 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpLen")
                 logger.log_tabular("Metrics/EvalTotalCost")
 
+            if epoch % 10 == 0:
+                # Add critic evaluation metrics
+                logger.log_tabular("Reward Value/EstimationError")
+                logger.log_tabular("Reward Value/MeanAbsError")
+                logger.log_tabular("Reward Value/OverestimationRatio")
+                logger.log_tabular("Reward Value/UnderestimationRatio")
+                logger.log_tabular("Reward Value/MaxError")
+                logger.log_tabular("Reward Value/PearsonCorr")
+                logger.log_tabular("Reward Value/SpearmanCorr")
+                logger.log_tabular("Reward Value/KendallCorr")
+                logger.log_tabular("Reward Value/MeanPredicted")
+                logger.log_tabular("Reward Value/StdPredicted")
+                logger.log_tabular("Reward Value/MeanMCReturn")
+                logger.log_tabular("Reward Value/StdMCReturn")
+                logger.log_tabular("Reward Value/MinMCReturn")
+                logger.log_tabular("Reward Value/MaxMCReturn")
+                logger.log_tabular("Reward Value/MinPredicted")
+                logger.log_tabular("Reward Value/MaxPredicted")
+                logger.log_tabular("Cost Value/EstimationError")
+                logger.log_tabular("Cost Value/MeanAbsError")
+                logger.log_tabular("Cost Value/OverestimationRatio")
+                logger.log_tabular("Cost Value/UnderestimationRatio")
+                logger.log_tabular("Cost Value/MaxError")
+                logger.log_tabular("Cost Value/PearsonCorr")
+                logger.log_tabular("Cost Value/SpearmanCorr")
+                logger.log_tabular("Cost Value/KendallCorr")
+                logger.log_tabular("Cost Value/MeanPredicted")
+                logger.log_tabular("Cost Value/StdPredicted")
+                logger.log_tabular("Cost Value/MinPredicted")
+                logger.log_tabular("Cost Value/MaxPredicted")
+                logger.log_tabular("Cost Value/MeanMCReturn")
+                logger.log_tabular("Cost Value/StdMCReturn")
+                logger.log_tabular("Cost Value/MinMCReturn")
+                logger.log_tabular("Cost Value/MaxMCReturn")
             logger.log_tabular("Train/Epoch", epoch + 1)
             logger.log_tabular("Train/TotalSteps", (epoch + 1) * args.steps_per_epoch)
             logger.log_tabular("Train/KL")

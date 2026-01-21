@@ -177,9 +177,10 @@ class ActorVCritic(nn.Module):
         value_estimate = actor_critic.get_value(observation)
     """
 
-    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None):
+    def __init__(self, obs_dim, act_dim, hidden_sizes: list = [64, 64], use_risk=False, risk_size=None, use_cdq=False):
         super().__init__()
         self.use_risk = use_risk
+        self.use_cdq = use_cdq
         self.reward_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
         self.reward_critic_v2 = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
         self.cost_critic = VCritic(obs_dim, hidden_sizes, use_risk=use_risk, risk_size=risk_size)
@@ -228,16 +229,19 @@ class ActorVCritic(nn.Module):
             value_r_v2 = self.reward_critic_v2(obs, risk)
             value_c = self.cost_critic(obs, risk)
             value_c_v2 = self.cost_critic_v2(obs, risk)
-            value_r = torch.min(value_r, value_r_v2)
-            value_c = torch.max(value_c, value_c_v2)
+
         else:
             value_r = self.reward_critic(obs)
             value_c = self.cost_critic(obs)
             value_r_v2 = self.reward_critic_v2(obs)
             value_c_v2 = self.cost_critic_v2(obs)
+
+        if self.use_cdq:
             value_r = torch.min(value_r, value_r_v2)
             value_c = torch.max(value_c, value_c_v2)
-        return action, log_prob, value_r, value_c
+        
+        std_r, std_c = torch.abs(value_r - value_r_v2), torch.abs(value_c - value_c_v2)
+        return action, log_prob, value_r, value_c, std_r, std_c
 
 class MultiAgentActor(nn.Module):
     """

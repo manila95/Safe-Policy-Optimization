@@ -72,7 +72,7 @@ def rollout_policy(
         for _ in range(max_ep_len):
             with torch.no_grad():
                 risk = torch.exp(risk_model(obs)) if use_risk else None
-                _, _, value_r_combined, value_c_combined = policy.step(obs, risk, deterministic=True)
+                _, _, value_r_combined, value_c_combined, std_r_combined, std_c_combined = policy.step(obs, risk, deterministic=True)
                 
                 # Get individual critic values from the new model structure
                 if use_risk:

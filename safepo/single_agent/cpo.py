@@ -379,6 +379,7 @@ def main(args, cfg_env=None):
         hidden_sizes=config["hidden_sizes"],
         use_risk=args.use_risk,
         risk_size=risk_size,
+        use_cdq=args.use_cdq
     ).to(device)
     reward_critic_optimizer = torch.optim.Adam(
         policy.reward_critic.parameters(), lr=1e-3
@@ -464,7 +465,7 @@ def main(args, cfg_env=None):
         for steps in range(local_steps_per_epoch):
             with torch.no_grad():
                 risk = risk_model(obs) if args.use_risk else None 
-                act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
+                act, log_prob, value_r, value_c, std_r, std_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
             next_obs, reward, cost, terminated, truncated, info = env.step(action)
 
@@ -525,6 +526,8 @@ def main(args, cfg_env=None):
                 value_r=value_r,
                 value_c=value_c,
                 log_prob=log_prob,
+                std_r=std_r,
+                std_c=std_c,
             )
 
             obs = next_obs
@@ -538,17 +541,19 @@ def main(args, cfg_env=None):
                         if epoch_end:
                             with torch.no_grad():
                                 risk_idx = risk[idx] if args.use_risk else None
-                                _, _, last_value_r, last_value_c = policy.step(
+                                _, _, last_value_r, last_value_c, last_std_r, last_std_c = policy.step(
                                     obs[idx], risk_idx, deterministic=False
                                 )
                         if time_out:
                             with torch.no_grad():
                                 final_risk_idx = final_risk[idx] if args.use_risk else None
-                                _, _, last_value_r, last_value_c = policy.step(
+                                _, _, last_value_r, last_value_c, last_std_r, last_std_c = policy.step(
                                     info["final_observation"][idx], final_risk_idx, deterministic=False
                                 )
                         last_value_r = last_value_r.unsqueeze(0)
                         last_value_c = last_value_c.unsqueeze(0)
+                        last_std_r = last_std_r.unsqueeze(0)
+                        last_std_c = last_std_c.unsqueeze(0)
                     if done or time_out:
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
@@ -571,7 +576,7 @@ def main(args, cfg_env=None):
                         logger.logged = False
 
                     buffer.finish_path(
-                        last_value_r=last_value_r, last_value_c=last_value_c, idx=idx
+                        last_value_r=last_value_r, last_value_c=last_value_c, last_std_r=last_std_r, last_std_c=last_std_c, idx=idx
                     )
         rollout_end_time = time.time()
 
@@ -623,10 +628,15 @@ def main(args, cfg_env=None):
         policy.actor.zero_grad()
 
         # compute loss_pi
+        iv_weights_r = 1 / data["std_r"]
+        iv_weights_c = 1 / data["std_c"]
+
+        iv_weights_r = iv_weights_r / iv_weights_r.mean()
+        iv_weights_c = iv_weights_c / iv_weights_c.mean()
         temp_distribution = policy.actor(data["obs"], data["risk"])
         log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
         ratio = torch.exp(log_prob - data["log_prob"])
-        loss_pi_r = -(ratio * data["adv_r"]).mean()
+        loss_pi_r = -(ratio * data["adv_r"]*iv_weights_r).mean()
         loss_reward_before = loss_pi_r.item()
         old_distribution = policy.actor(data["obs"], data["risk"])
         loss_pi_r.backward()
@@ -642,7 +652,7 @@ def main(args, cfg_env=None):
         temp_distribution = policy.actor(data["obs"], data["risk"])
         log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
         ratio = torch.exp(log_prob - data["log_prob"])
-        loss_pi_c = (ratio * data["adv_c"]).mean()
+        loss_pi_c = (ratio * data["adv_c"]*iv_weights_c).mean()
         loss_cost_before = loss_pi_c.item()
 
         loss_pi_c.backward()
@@ -746,14 +756,14 @@ def main(args, cfg_env=None):
                     temp_distribution = policy.actor(data["obs"], data["risk"])
                     log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
                     ratio = torch.exp(log_prob - data["log_prob"])
-                    loss_reward = -(ratio * data["adv_r"]).mean()
+                    loss_reward = -(ratio * data["adv_r"]*iv_weights_r).mean()
                 except ValueError:
                     step_frac *= STEP_FRACTION
                     continue
                 temp_distribution = policy.actor(data["obs"], data["risk"])
                 log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
                 ratio = torch.exp(log_prob - data["log_prob"])
-                loss_cost = (ratio * data["adv_c"]).mean()
+                loss_cost = (ratio * data["adv_c"]*iv_weights_c).mean()
                 current_distribution = policy.actor(data["obs"], data["risk"]) 
                 kl = torch.distributions.kl.kl_divergence(
                     old_distribution, current_distribution

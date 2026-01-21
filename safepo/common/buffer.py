@@ -65,6 +65,8 @@ class VectorizedOnPolicyBuffer:
                 "value_c": torch.zeros(size, dtype=torch.float32, device=device),
                 "adv_r": torch.zeros(size, dtype=torch.float32, device=device),
                 "adv_c": torch.zeros(size, dtype=torch.float32, device=device),
+                "std_r": torch.zeros(size, dtype=torch.float32, device=device),
+                "std_c": torch.zeros(size, dtype=torch.float32, device=device),
                 "target_value_r": torch.zeros(size, dtype=torch.float32, device=device),
                 "target_value_c": torch.zeros(size, dtype=torch.float32, device=device),
                 "log_prob": torch.zeros(size, dtype=torch.float32, device=device),
@@ -98,6 +100,8 @@ class VectorizedOnPolicyBuffer:
         self,
         last_value_r: torch.Tensor | None = None,
         last_value_c: torch.Tensor | None = None,
+        last_std_r: torch.Tensor | None = None,
+        last_std_c: torch.Tensor | None = None,
         idx: int = 0,
     ) -> None:
         """
@@ -119,7 +123,6 @@ class VectorizedOnPolicyBuffer:
         costs = torch.cat([self.buffers[idx]["cost"][path_slice], last_value_c])
         values_r = torch.cat([self.buffers[idx]["value_r"][path_slice], last_value_r])
         values_c = torch.cat([self.buffers[idx]["value_c"][path_slice], last_value_c])
-
         adv_r, target_value_r = calculate_adv_and_value_targets(
             values_r,
             rewards,
@@ -136,7 +139,6 @@ class VectorizedOnPolicyBuffer:
         self.buffers[idx]["adv_c"][path_slice] = adv_c
         self.buffers[idx]["target_value_r"][path_slice] = target_value_r
         self.buffers[idx]["target_value_c"][path_slice] = target_value_c
-
         self.path_start_idx_list[idx] = self.ptr_list[idx]
 
     def get(self) -> dict[str, torch.Tensor]:

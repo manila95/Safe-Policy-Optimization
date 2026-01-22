@@ -628,11 +628,21 @@ def main(args, cfg_env=None):
         policy.actor.zero_grad()
 
         # compute loss_pi
-        iv_weights_r = 1 / data["std_r"]
-        iv_weights_c = 1 / data["std_c"]
+        iv_weights_r = 1 / (data["std_r"] + 1e-8)
+        iv_weights_c = 1 / (data["std_c"] + 1e-8)
 
-        iv_weights_r = iv_weights_r / iv_weights_r.mean()
-        iv_weights_c = iv_weights_c / iv_weights_c.mean()
+        # Handle potentially small/zero sums
+        r_sum = iv_weights_r.sum()
+        if r_sum < 1e-8:
+             iv_weights_r = torch.ones_like(iv_weights_r) / len(iv_weights_r)
+        else:
+             iv_weights_r = iv_weights_r / r_sum
+
+        c_sum = iv_weights_c.sum()
+        if c_sum < 1e-8:
+             iv_weights_c = torch.ones_like(iv_weights_c) / len(iv_weights_c)
+        else:
+             iv_weights_c = iv_weights_c / c_sum
         temp_distribution = policy.actor(data["obs"], data["risk"])
         log_prob = temp_distribution.log_prob(data["act"]).sum(dim=-1)
         ratio = torch.exp(log_prob - data["log_prob"])

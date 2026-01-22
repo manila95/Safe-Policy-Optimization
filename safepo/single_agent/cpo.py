@@ -35,11 +35,12 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
 import wandb
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
+from safepo.common.env import make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
-from safepo.single_agent.utils import *
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
+# from safepo.utils.risk import *
+from safepo.single_agent.utils import *
 
 
 STEP_FRACTION=0.8
@@ -334,6 +335,13 @@ def fvp(
     return flat_grad_grad_kl + params * 0.1
 
 
+def env_fn(env_id):
+    if "Safety" in env_id:
+        return make_sa_safetygym_env
+    else:
+        return make_sa_gymrobot_env
+
+
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
     random.seed(args.seed)
@@ -352,15 +360,15 @@ def main(args, cfg_env=None):
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
 
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
-            num_envs=args.num_envs, env_id=args.task, seed=args.seed
+        env, obs_space, act_space = env_fn(args.task)(
+            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
         )
-        eval_env, _, _ = make_sa_mujoco_env(num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = env_fn(args.task)(args, num_envs=1, env_id=args.task, seed=None)
         config = default_cfg
 
     else:
-        sim_params = parse_sim_params(args, cfg_env, None)
-        env = make_sa_isaac_env(args=args, cfg=cfg_env, sim_params=sim_params)
+        sim_params = parse_sim_params(cfg_env, None)
+        env = make_sa_isaac_env(cfg=cfg_env, sim_params=sim_params)
         eval_env = env
         obs_space = env.observation_space
         act_space = env.action_space
@@ -466,15 +474,19 @@ def main(args, cfg_env=None):
                 risk = risk_model(obs) if args.use_risk else None 
                 act, log_prob, value_r, value_c = policy.step(obs, risk, deterministic=False)          
             action = act.detach().squeeze() if args.task in isaac_gym_map.keys() else act.detach().squeeze().cpu().numpy()
-            next_obs, reward, cost, terminated, truncated, info = env.step(action)
-
+            if "Safe" in args.task:
+                next_obs, reward, cost, terminated, truncated, info = env.step(action)
+                success = 0
+            else:
+                next_obs, reward, terminated, truncated, info = env.step(action)
+                cost = terminated
             ep_ret += reward.cpu().numpy() if args.task in isaac_gym_map.keys() else reward
             ep_cost += cost.cpu().numpy() if args.task in isaac_gym_map.keys() else cost
             ep_len += 1
             next_obs, reward, cost, terminated, truncated = (
                 torch.as_tensor(x, dtype=torch.float32, device=device)
                 for x in (next_obs, reward, cost, terminated, truncated)
-            )
+            )   
             if args.use_risk and args.fine_tune_risk:
                 f_next_obs = next_obs.unsqueeze(0).to("cpu") if f_next_obs is None else torch.concat([f_next_obs, next_obs.unsqueeze(0).to("cpu")], axis=0)
                 f_costs = cost.unsqueeze(0).to("cpu") if f_costs is None else torch.concat([f_costs, cost.unsqueeze(0).to("cpu")], axis=0)

@@ -14,7 +14,8 @@ def rollout_policy(
     max_ep_len: int,
     device: torch.device,
     use_risk: bool = False,
-    risk_model = None
+    risk_model = None,
+    evaluation_horizon: int = 1000
 ) -> Dict[str, List[torch.Tensor]]:
     """
     Rollout policy for multiple episodes to collect Monte Carlo returns.
@@ -24,19 +25,20 @@ def rollout_policy(
         policy: The policy to evaluate
         env: The vectorized environment to rollout in
         num_episodes: Number of episodes to rollout
-        max_ep_len: Maximum episode length
+        max_ep_len: Maximum episode length (full rollout length)
         device: Device to run computations on
         use_risk: Whether to use risk estimation
         risk_model: Risk estimation model if use_risk is True
+        evaluation_horizon: Number of states to keep for evaluation (first N states)
         
     Returns:
         Dictionary containing lists of tensors for:
-        - rewards: List of reward sequences
-        - costs: List of cost sequences  
-        - dones: List of done flags
-        - obs: List of observations
-        - value_r: List of reward value estimates
-        - value_c: List of cost value estimates
+        - rewards: List of reward sequences (full length for MC computation)
+        - costs: List of cost sequences (full length for MC computation)
+        - dones: List of done flags (full length for MC computation)
+        - obs: List of observations (first evaluation_horizon states only)
+        - value_r: List of reward value estimates (first evaluation_horizon states only)
+        - value_c: List of cost value estimates (first evaluation_horizon states only)
     """
     episode_data = {
         'rewards': [],
@@ -59,16 +61,22 @@ def rollout_policy(
         obs, _ = env.reset()
         obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
         
-        episode_rewards = []
-        episode_costs = []
-        episode_dones = []
-        episode_obs = []
-        episode_value_r = []
-        episode_value_c = []
-        episode_value_r_eval = []
-        episode_value_c_eval = []
+        # Track which environments have already been stored
+        stored_envs = set()
         
-        for _ in range(max_ep_len):
+        # Per-environment episode data
+        env_episode_data = {i: {
+            'rewards': [],
+            'costs': [],
+            'dones': [],
+            'obs': [],
+            'value_r': [],
+            'value_c': [],
+            'value_r_eval': [],
+            'value_c_eval': []
+        } for i in range(num_envs)}
+        
+        for step in range(max_ep_len):
             with torch.no_grad():
                 risk = torch.exp(risk_model(obs)) if use_risk else None
                 _, _, value_r, value_c = policy.step(obs, risk, deterministic=True)
@@ -76,12 +84,6 @@ def rollout_policy(
                 # Get eval critic values if double critic is enabled
                 if hasattr(policy, 'use_double_critic') and policy.use_double_critic:
                     value_r_eval, value_c_eval = policy.get_eval_values(obs, risk)
-                    episode_value_r_eval.append(value_r_eval)
-                    episode_value_c_eval.append(value_c_eval)
-            
-            episode_obs.append(obs)
-            episode_value_r.append(value_r)
-            episode_value_c.append(value_c)
             
             action = policy.actor(obs, risk).sample()
             # Vector envs expect numpy actions; avoid numpy * Tensor type errors.
@@ -99,26 +101,46 @@ def rollout_policy(
                     cost = terminated
                     success = 0 
             
-            episode_rewards.append(torch.as_tensor(reward, dtype=torch.float32, device=device))
-            episode_costs.append(torch.as_tensor(cost, dtype=torch.float32, device=device))
-            episode_dones.append(torch.as_tensor(terminated | truncated, dtype=torch.float32, device=device))
+            # Store data for each environment
+            reward_t = torch.as_tensor(reward, dtype=torch.float32, device=device)
+            cost_t = torch.as_tensor(cost, dtype=torch.float32, device=device)
+            done_t = torch.as_tensor(terminated | truncated, dtype=torch.float32, device=device)
+            
+            for env_idx in range(num_envs):
+                if env_idx not in stored_envs:
+                    # Store all rewards/costs/dones for full trajectory (needed for MC computation)
+                    env_episode_data[env_idx]['rewards'].append(reward_t[env_idx])
+                    env_episode_data[env_idx]['costs'].append(cost_t[env_idx])
+                    env_episode_data[env_idx]['dones'].append(done_t[env_idx])
+                    
+                    # Only store observations and value estimates for first evaluation_horizon states
+                    if step < evaluation_horizon:
+                        env_episode_data[env_idx]['obs'].append(obs[env_idx])
+                        env_episode_data[env_idx]['value_r'].append(value_r[env_idx])
+                        env_episode_data[env_idx]['value_c'].append(value_c[env_idx])
+                        if hasattr(policy, 'use_double_critic') and policy.use_double_critic:
+                            env_episode_data[env_idx]['value_r_eval'].append(value_r_eval[env_idx])
+                            env_episode_data[env_idx]['value_c_eval'].append(value_c_eval[env_idx])
             
             obs = torch.as_tensor(next_obs, dtype=torch.float32, device=device)
             
-            # Check which environments are done
+            # Check which environments are done and store their data
             done_envs = (terminated | truncated).nonzero()[0]
             for env_idx in done_envs:
-                if episodes_completed < num_episodes:
-                    # Extract and store the episode data for this environment
-                    episode_data['rewards'].append(torch.stack([r[env_idx] for r in episode_rewards]))
-                    episode_data['costs'].append(torch.stack([c[env_idx] for c in episode_costs]))
-                    episode_data['dones'].append(torch.stack([d[env_idx] for d in episode_dones]))
-                    episode_data['obs'].append(torch.stack([o[env_idx] for o in episode_obs]))
-                    episode_data['value_r'].append(torch.stack([vr[env_idx] for vr in episode_value_r]))
-                    episode_data['value_c'].append(torch.stack([vc[env_idx] for vc in episode_value_c]))
+                env_idx = env_idx.item()
+                if env_idx not in stored_envs and episodes_completed < num_episodes:
+                    # Store full trajectory for MC computation, but only first evaluation_horizon for value estimates
+                    episode_data['rewards'].append(torch.stack(env_episode_data[env_idx]['rewards']))
+                    episode_data['costs'].append(torch.stack(env_episode_data[env_idx]['costs']))
+                    episode_data['dones'].append(torch.stack(env_episode_data[env_idx]['dones']))
+                    # Only store first evaluation_horizon observations and value estimates
+                    episode_data['obs'].append(torch.stack(env_episode_data[env_idx]['obs']))
+                    episode_data['value_r'].append(torch.stack(env_episode_data[env_idx]['value_r']))
+                    episode_data['value_c'].append(torch.stack(env_episode_data[env_idx]['value_c']))
                     if hasattr(policy, 'use_double_critic') and policy.use_double_critic:
-                        episode_data['value_r_eval'].append(torch.stack([vr[env_idx] for vr in episode_value_r_eval]))
-                        episode_data['value_c_eval'].append(torch.stack([vc[env_idx] for vc in episode_value_c_eval]))
+                        episode_data['value_r_eval'].append(torch.stack(env_episode_data[env_idx]['value_r_eval']))
+                        episode_data['value_c_eval'].append(torch.stack(env_episode_data[env_idx]['value_c_eval']))
+                    stored_envs.add(env_idx)
                     episodes_completed += 1
             
             if episodes_completed >= num_episodes:
@@ -126,6 +148,23 @@ def rollout_policy(
             
             if (terminated | truncated).all():
                 break
+        
+        # Handle case where episode reaches max_ep_len without termination
+        # Store data for environments that haven't been stored yet
+        for env_idx in range(num_envs):
+            if env_idx not in stored_envs and episodes_completed < num_episodes:
+                # Store full trajectory for MC computation, but only first evaluation_horizon for value estimates
+                episode_data['rewards'].append(torch.stack(env_episode_data[env_idx]['rewards']))
+                episode_data['costs'].append(torch.stack(env_episode_data[env_idx]['costs']))
+                episode_data['dones'].append(torch.stack(env_episode_data[env_idx]['dones']))
+                # Only store first evaluation_horizon observations and value estimates
+                episode_data['obs'].append(torch.stack(env_episode_data[env_idx]['obs']))
+                episode_data['value_r'].append(torch.stack(env_episode_data[env_idx]['value_r']))
+                episode_data['value_c'].append(torch.stack(env_episode_data[env_idx]['value_c']))
+                if hasattr(policy, 'use_double_critic') and policy.use_double_critic:
+                    episode_data['value_r_eval'].append(torch.stack(env_episode_data[env_idx]['value_r_eval']))
+                    episode_data['value_c_eval'].append(torch.stack(env_episode_data[env_idx]['value_c_eval']))
+                episodes_completed += 1
                 
         if episodes_completed >= num_episodes:
             break
@@ -135,19 +174,23 @@ def rollout_policy(
 
 def calculate_monte_carlo_returns_from_rollouts(
     episode_data: Dict[str, List[torch.Tensor]],
-    gamma: float = 0.99
+    gamma: float = 0.99,
+    evaluation_horizon: int = 1000
 ) -> Dict[str, List[torch.Tensor]]:
     """
     Calculate Monte Carlo returns from rollout data.
+    Computes returns for first evaluation_horizon states using a fixed horizon of evaluation_horizon steps.
+    This ensures fair comparison: both MC estimates and value function estimates use the same horizon length.
     
     Args:
         episode_data: Dictionary containing lists of tensors from rollout_policy
         gamma: Discount factor
+        evaluation_horizon: Number of states to compute returns for (first N states) and horizon length
         
     Returns:
         Dictionary containing lists of tensors for:
-        - reward_returns: List of reward return sequences
-        - cost_returns: List of cost return sequences
+        - reward_returns: List of reward return sequences (first evaluation_horizon states only)
+        - cost_returns: List of cost return sequences (first evaluation_horizon states only)
     """
     returns = {
         'reward_returns': [],
@@ -155,22 +198,39 @@ def calculate_monte_carlo_returns_from_rollouts(
     }
     
     for ep_idx in range(len(episode_data['rewards'])):
-        rewards = episode_data['rewards'][ep_idx]
-        costs = episode_data['costs'][ep_idx]
-        dones = episode_data['dones'][ep_idx]
+        rewards = episode_data['rewards'][ep_idx]  # Full trajectory
+        costs = episode_data['costs'][ep_idx]  # Full trajectory
+        dones = episode_data['dones'][ep_idx]  # Full trajectory
         
-        seq_len = len(rewards)
-        reward_returns = torch.zeros_like(rewards)
-        cost_returns = torch.zeros_like(costs)
+        full_seq_len = len(rewards)
+        # Number of states to compute returns for (first evaluation_horizon states)
+        num_eval_states = min(evaluation_horizon, full_seq_len)
         
-        # Calculate returns from end to start
-        for t in range(seq_len-1, -1, -1):
-            if t == seq_len-1:
-                reward_returns[t] = rewards[t]
-                cost_returns[t] = costs[t]
-            else:
-                reward_returns[t] = rewards[t] + gamma * (1 - dones[t]) * reward_returns[t+1]
-                cost_returns[t] = costs[t] + gamma * (1 - dones[t]) * cost_returns[t+1]
+        # Initialize return tensors for first evaluation_horizon states
+        reward_returns = torch.zeros(num_eval_states, device=rewards.device, dtype=rewards.dtype)
+        cost_returns = torch.zeros(num_eval_states, device=costs.device, dtype=costs.dtype)
+        
+        # For each state t in [0, num_eval_states), compute return using fixed horizon
+        for t in range(num_eval_states):
+            # Compute return with fixed horizon of evaluation_horizon steps
+            # Use rewards from t to t+horizon (or until episode ends)
+            horizon = evaluation_horizon
+            end_idx = min(t + horizon, full_seq_len)
+            
+            # Compute discounted return from t to end_idx
+            reward_return = torch.tensor(0.0, device=rewards.device, dtype=rewards.dtype)
+            cost_return = torch.tensor(0.0, device=costs.device, dtype=costs.dtype)
+            
+            for i in range(t, end_idx):
+                discount_factor = gamma ** (i - t)
+                reward_return += discount_factor * rewards[i]
+                cost_return += discount_factor * costs[i]
+                # If episode ended at step i, stop accumulating (don't include future rewards)
+                if dones[i].item() > 0:
+                    break
+            
+            reward_returns[t] = reward_return
+            cost_returns[t] = cost_return
         
         returns['reward_returns'].append(reward_returns)
         returns['cost_returns'].append(cost_returns)
@@ -415,7 +475,8 @@ def evaluate_critic_performance_from_rollouts(
     gamma: float = 0.99,
     use_risk: bool = False,
     risk_model = None,
-    create_plots: bool = False
+    create_plots: bool = False,
+    evaluation_horizon: int = 1000
 ) -> Dict[str, Dict[str, float]]:
     """
     Evaluate critic performance using Monte Carlo returns from fresh rollouts.
@@ -424,12 +485,13 @@ def evaluate_critic_performance_from_rollouts(
         policy: The policy to evaluate
         env: The environment to rollout in
         num_episodes: Number of episodes to rollout
-        max_ep_len: Maximum episode length
+        max_ep_len: Maximum episode length (full rollout length)
         device: Device to run computations on
         gamma: Discount factor
         use_risk: Whether to use risk estimation
         risk_model: Risk estimation model if use_risk is True
         create_plots: Whether to create scatter plots
+        evaluation_horizon: Number of states to evaluate (first N states)
         
     Returns:
         Dictionary containing evaluation metrics for both reward and cost critics,
@@ -437,11 +499,11 @@ def evaluate_critic_performance_from_rollouts(
     """
     # Collect rollout data
     episode_data = rollout_policy(
-        args, policy, env, num_episodes, max_ep_len, device, use_risk, risk_model
+        args, policy, env, num_episodes, max_ep_len, device, use_risk, risk_model, evaluation_horizon
     )
     
     # Calculate Monte Carlo returns
-    returns = calculate_monte_carlo_returns_from_rollouts(episode_data, gamma)
+    returns = calculate_monte_carlo_returns_from_rollouts(episode_data, gamma, evaluation_horizon)
     
     # Flatten all episodes for evaluation
     all_value_r = torch.cat(episode_data['value_r'])
@@ -482,9 +544,14 @@ def evaluate_critic_performance_from_rollouts(
         color_label="Cost Discrepancy |Main - Eval|"
     )
     
-    # Calculate correlation between std and estimation error
-    reward_std_error_corr = calculate_correlation(reward_color_values, reward_metrics['error'])
-    cost_std_error_corr = calculate_correlation(cost_color_values, cost_metrics['error'])
+    # Calculate correlation between std and estimation error (if double critic is enabled)
+    if reward_color_values is not None and cost_color_values is not None:
+        reward_std_error_corr = calculate_correlation(reward_color_values, reward_metrics['error'])
+        cost_std_error_corr = calculate_correlation(cost_color_values, cost_metrics['error'])
+    else:
+        # Return empty correlation dict if double critic is not enabled
+        reward_std_error_corr = {'pearson_corr': 0.0, 'spearman_corr': 0.0, 'kendall_corr': 0.0}
+        cost_std_error_corr = {'pearson_corr': 0.0, 'spearman_corr': 0.0, 'kendall_corr': 0.0}
 
     reward_metrics['std_error_corr'] = reward_std_error_corr
     cost_metrics['std_error_corr'] = cost_std_error_corr

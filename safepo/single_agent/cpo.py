@@ -181,9 +181,9 @@ def main(args, cfg_env=None):
 
     if args.task not in isaac_gym_map.keys():
         env, obs_space, act_space = env_fn(args.task)(
-            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed
+            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed, num_steps=1000
         )
-        eval_env, _, _ = env_fn(args.task)(args, num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = env_fn(args.task)(args, num_envs=args.num_envs, env_id=args.task, seed=None, num_steps=2000)
         config = default_cfg
 
     else:
@@ -405,17 +405,19 @@ def main(args, cfg_env=None):
 
         if epoch % args.log_interval == 0:
             # Evaluate critic performance using fresh rollouts
+            # Run episodes for 2000 steps but only consider first 1000 states for fair comparison
             critic_metrics = evaluate_critic_performance_from_rollouts(
                 args=args,
                 policy=policy,
-                env=env,
+                env=eval_env,
                 num_episodes=eval_episodes,
-                max_ep_len=1000,  # Maximum episode length
+                max_ep_len=2000,  # Maximum episode length (full rollout)
                 device=device,
                 gamma=config['gamma'],
                 use_risk=args.use_risk,
                 risk_model=risk_train.model if args.use_risk else None,
-                create_plots=True
+                create_plots=True,
+                evaluation_horizon=1000  # Only evaluate first 1000 states for fair comparison
             )
 
             # Log the critic evaluation metrics

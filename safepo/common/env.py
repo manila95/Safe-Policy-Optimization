@@ -38,7 +38,7 @@ import gymnasium as gym
 from gymnasium.vector.async_vector_env import AsyncState, AsyncVectorEnv
 
 
-def make_sa_gymrobot_env(args,num_envs: int, env_id: str, seed: int|None = None):
+def make_sa_gymrobot_env(args,num_envs: int, env_id: str, seed: int|None = None, num_steps: int=None):
     """
     Creates and wraps an environment based on the specified parameters.
 
@@ -46,6 +46,7 @@ def make_sa_gymrobot_env(args,num_envs: int, env_id: str, seed: int|None = None)
         num_envs (int): Number of parallel environments.
         env_id (str): ID of the environment to create.
         seed (int or None, optional): Seed for the random number generator. Default is None.
+        num_steps (int or None, optional): Number of steps per episode. Default is None.
 
     Returns:
         env: The created and wrapped environment.
@@ -58,13 +59,14 @@ def make_sa_gymrobot_env(args,num_envs: int, env_id: str, seed: int|None = None)
         >>> env, obs_space, act_space = make_sa_mujoco_env(
         >>>     num_envs=1, 
         >>>     env_id="SafetyPointGoal1-v0", 
-        >>>     seed=0
+        >>>     seed=0,
+        >>>     num_steps=1000
         >>> )
     """
     if num_envs > 1:
         def create_env() -> Callable:
             """Creates an environment that can enable or disable the environment checker."""
-            env = gym.make(env_id)
+            env = gym.make(env_id, max_episode_steps=num_steps)
             env = SafeRescaleAction(env, -1.0, 1.0)
             return env
         env_fns = [create_env for _ in range(num_envs)]
@@ -135,7 +137,7 @@ class SafeGymRobotAutoResetWrapper(AutoResetWrapper):
         return obs, reward, terminated, truncated, info
 
 
-def make_sa_safetygym_env(cfg, num_envs: int, env_id: str, seed: int|None = None):
+def make_sa_safetygym_env(cfg, num_envs: int, env_id: str, seed: int|None = None, num_steps: int=None):
     """
     Creates and wraps an environment based on the specified parameters.
 
@@ -143,6 +145,7 @@ def make_sa_safetygym_env(cfg, num_envs: int, env_id: str, seed: int|None = None
         num_envs (int): Number of parallel environments.
         env_id (str): ID of the environment to create.
         seed (int or None, optional): Seed for the random number generator. Default is None.
+        num_steps (int or None, optional): Number of steps per episode. Default is None.
 
     Returns:
         env: The created and wrapped environment.
@@ -155,13 +158,14 @@ def make_sa_safetygym_env(cfg, num_envs: int, env_id: str, seed: int|None = None
         >>> env, obs_space, act_space = make_sa_mujoco_env(
         >>>     num_envs=1, 
         >>>     env_id="SafetyPointGoal1-v0", 
-        >>>     seed=0
+        >>>     seed=0,
+        >>>     num_steps=1000
         >>> )
     """
     if num_envs > 1:
         def create_env() -> Callable:
             """Creates an environment that can enable or disable the environment checker."""
-            env = safety_gymnasium.make(env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+            env = safety_gymnasium.make(env_id, num_steps=num_steps, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
             env = SafeRescaleAction(env, -1.0, 1.0)
             return env
         env_fns = [create_env for _ in range(num_envs)]
@@ -171,7 +175,7 @@ def make_sa_safetygym_env(cfg, num_envs: int, env_id: str, seed: int|None = None
         obs_space = env.single_observation_space
         act_space = env.single_action_space
     else:
-        env = safety_gymnasium.make(env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+        env = safety_gymnasium.make(env_id, num_steps=num_steps, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
         env.reset(seed=seed)
         obs_space = env.observation_space
         act_space = env.action_space

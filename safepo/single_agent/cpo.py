@@ -353,11 +353,13 @@ def main(args, cfg_env=None):
                         rew_deque.append(ep_ret[idx])
                         cost_deque.append(ep_cost[idx])
                         len_deque.append(ep_len[idx])
+                        total_cost += ep_cost[idx]
                         logger.store(
                             **{
                                 "Metrics/EpRet": np.mean(rew_deque),
                                 "Metrics/EpCost": np.mean(cost_deque),
                                 "Metrics/EpLen": np.mean(len_deque),
+                                "Metrics/TotalCost": total_cost,
                             }
                         )
                         ep_ret[idx] = 0.0
@@ -408,7 +410,7 @@ def main(args, cfg_env=None):
             # Run episodes for 2000 steps but only consider first 1000 states for fair comparison
             critic_metrics = evaluate_critic_performance_from_rollouts(
                 args=args,
-                policy=policy,
+                policy=policy, 
                 env=eval_env,
                 num_episodes=eval_episodes,
                 max_ep_len=2000,  # Maximum episode length (full rollout)
@@ -826,6 +828,7 @@ def main(args, cfg_env=None):
             logger.log_tabular("Metrics/EpRet")
             logger.log_tabular("Metrics/EpCost")
             logger.log_tabular("Metrics/EpLen")
+            logger.log_tabular("Metrics/TotalCost")
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")

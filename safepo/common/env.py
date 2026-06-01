@@ -165,7 +165,10 @@ def make_sa_safetygym_env(cfg, num_envs: int, env_id: str, seed: int|None = None
     if num_envs > 1:
         def create_env() -> Callable:
             """Creates an environment that can enable or disable the environment checker."""
-            env = safety_gymnasium.make(env_id, num_steps=num_steps, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+            try:
+                env = safety_gymnasium.make(env_id, num_steps=num_steps, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+            except:
+                env = safety_gymnasium.make(env_id)
             env = SafeRescaleAction(env, -1.0, 1.0)
             return env
         env_fns = [create_env for _ in range(num_envs)]

@@ -5,6 +5,7 @@ from safepo.common.model import ActorVCritic
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
+from tqdm import tqdm
 
 def rollout_policy(
     args,
@@ -56,7 +57,8 @@ def rollout_policy(
     
     num_envs = env.num_envs
     episodes_completed = 0
-    
+
+    pbar = tqdm(total=num_episodes, desc="Collecting episodes", unit="ep")
     while episodes_completed < num_episodes:
         obs, _ = env.reset()
         obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
@@ -142,7 +144,8 @@ def rollout_policy(
                         episode_data['value_c_eval'].append(torch.stack(env_episode_data[env_idx]['value_c_eval']))
                     stored_envs.add(env_idx)
                     episodes_completed += 1
-            
+                    pbar.update(1)
+
             if episodes_completed >= num_episodes:
                 break
             
@@ -165,10 +168,12 @@ def rollout_policy(
                     episode_data['value_r_eval'].append(torch.stack(env_episode_data[env_idx]['value_r_eval']))
                     episode_data['value_c_eval'].append(torch.stack(env_episode_data[env_idx]['value_c_eval']))
                 episodes_completed += 1
-                
+                pbar.update(1)
+
         if episodes_completed >= num_episodes:
             break
-            
+
+    pbar.close()
     # print(torch.sum(torch.stack(episode_data["costs"])))
     return episode_data
 

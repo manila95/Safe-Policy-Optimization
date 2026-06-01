@@ -404,7 +404,8 @@ def main(args, cfg_env=None):
                     "Metrics/EvalEpLen": np.mean(eval_len),
                 }
             )
-
+        log_interval = args.log_interval if epoch <= 100 else 100
+        
         if epoch % args.log_interval == 0:
             # Evaluate critic performance using fresh rollouts
             # Run episodes for 2000 steps but only consider first 1000 states for fair comparison

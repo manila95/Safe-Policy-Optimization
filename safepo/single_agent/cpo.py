@@ -925,8 +925,8 @@ def main(args, cfg_env=None):
 if __name__ == "__main__":
     args, cfg_env = single_agent_args()
     import wandb
-    run = wandb.init(config=vars(args), entity="kaustubh95",
-                project="conservatism_in_rl",
+    run = wandb.init(config=vars(args), entity="liam-paull",
+                project="calibration_rl",
                 monitor_gym=True,
                 dir=os.path.join(args.log_dir, args.experiment),
                 sync_tensorboard=True, save_code=True)

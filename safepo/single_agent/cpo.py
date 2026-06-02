@@ -497,35 +497,32 @@ def main(args, cfg_env=None):
 
             # Log plots to wandb
             wandb_log_dict = {}
+            figs_to_close = []
             if 'plot_fig' in critic_metrics['reward_critic']:
-                # Convert matplotlib figure to image
                 reward_fig = critic_metrics['reward_critic']['plot_fig']
-                reward_img = wandb.Image(reward_fig)
-                wandb_log_dict["plots/reward_value_scatter"] = reward_img
-                plt.close(reward_fig)
-            
+                wandb_log_dict["plots/reward_value_scatter"] = wandb.Image(reward_fig)
+                figs_to_close.append(reward_fig)
+
             if 'plot_fig' in critic_metrics['cost_critic']:
-                # Convert matplotlib figure to image
                 cost_fig = critic_metrics['cost_critic']['plot_fig']
-                cost_img = wandb.Image(cost_fig)
-                wandb_log_dict["plots/cost_value_scatter"] = cost_img
-                plt.close(cost_fig)
-            
+                wandb_log_dict["plots/cost_value_scatter"] = wandb.Image(cost_fig)
+                figs_to_close.append(cost_fig)
+
             # Log critic comparison plots if available
             if 'reward_discrepancy' in critic_metrics and 'comparison_plot' in critic_metrics['reward_discrepancy']:
                 reward_comp_fig = critic_metrics['reward_discrepancy']['comparison_plot']
-                reward_comp_img = wandb.Image(reward_comp_fig)
-                wandb_log_dict["plots/reward_critic_comparison"] = reward_comp_img
-                plt.close(reward_comp_fig)
-            
+                wandb_log_dict["plots/reward_critic_comparison"] = wandb.Image(reward_comp_fig)
+                figs_to_close.append(reward_comp_fig)
+
             if 'cost_discrepancy' in critic_metrics and 'comparison_plot' in critic_metrics['cost_discrepancy']:
                 cost_comp_fig = critic_metrics['cost_discrepancy']['comparison_plot']
-                cost_comp_img = wandb.Image(cost_comp_fig)
-                wandb_log_dict["plots/cost_critic_comparison"] = cost_comp_img
-                plt.close(cost_comp_fig)
+                wandb_log_dict["plots/cost_critic_comparison"] = wandb.Image(cost_comp_fig)
+                figs_to_close.append(cost_comp_fig)
 
             if wandb_log_dict:
                 wandb.log(wandb_log_dict, step=epoch+1)
+            for fig in figs_to_close:
+                plt.close(fig)
 
         eval_end_time = time.time()
 

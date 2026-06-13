@@ -528,7 +528,7 @@ def main(args, cfg_env=None):
 
         ## Risk Fine Tuning before the policy is updated
         if args.use_risk and args.fine_tune_risk:
-            risk_loss = risk_train.train()
+            risk_loss = risk_train.train(num_epochs=args.num_risk_epochs)
             logger.store(**{"risk/risk_loss": risk_loss})
             wandb.log({"risk/risk_loss": risk_loss}, step=epoch+1)
 

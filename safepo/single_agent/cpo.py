@@ -448,7 +448,7 @@ def main(args, cfg_env=None):
                 device=device,
                 gamma=config['gamma'],
                 use_risk=args.use_risk,
-                risk_model=risk_train.model if args.use_risk else None,
+                risk_model=risk_model if args.use_risk else None,
                 create_plots=True
             )
 

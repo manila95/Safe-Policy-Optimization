@@ -39,6 +39,7 @@ from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
 from safepo.single_agent.utils import *
+from safepo.single_agent.srpl import *
 from safepo.utils.config import single_agent_args, isaac_gym_map, parse_sim_params
 #from src.models.risk_models import *
 #from src.datasets.risk_datasets import *

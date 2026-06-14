@@ -5,27 +5,7 @@ from safepo.common.model import ActorVCritic
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
-
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-
-
-
-def get_activation(name):
-    activation_dict = {
-        'relu': nn.ReLU(),
-        "sigmoid": nn.Sigmoid(),
-        "tanh": nn.Tanh(),
-        "softmax": nn.Softmax(dim=1),
-        "logsoftmax": nn.LogSoftmax(dim=1),
-    }
-
-    return activation_dict[name]
-
-
+from tqdm import tqdm
 
 def rollout_policy(
     args,
@@ -35,7 +15,8 @@ def rollout_policy(
     max_ep_len: int,
     device: torch.device,
     use_risk: bool = False,
-    risk_model = None
+    risk_model = None,
+    evaluation_horizon: int = 1000
 ) -> Dict[str, List[torch.Tensor]]:
     """
     Rollout policy for multiple episodes to collect Monte Carlo returns.
@@ -45,19 +26,20 @@ def rollout_policy(
         policy: The policy to evaluate
         env: The vectorized environment to rollout in
         num_episodes: Number of episodes to rollout
-        max_ep_len: Maximum episode length
+        max_ep_len: Maximum episode length (full rollout length)
         device: Device to run computations on
         use_risk: Whether to use risk estimation
         risk_model: Risk estimation model if use_risk is True
+        evaluation_horizon: Number of states to keep for evaluation (first N states)
         
     Returns:
         Dictionary containing lists of tensors for:
-        - rewards: List of reward sequences
-        - costs: List of cost sequences  
-        - dones: List of done flags
-        - obs: List of observations
-        - value_r: List of reward value estimates
-        - value_c: List of cost value estimates
+        - rewards: List of reward sequences (full length for MC computation)
+        - costs: List of cost sequences (full length for MC computation)
+        - dones: List of done flags (full length for MC computation)
+        - obs: List of observations (first evaluation_horizon states only)
+        - value_r: List of reward value estimates (first evaluation_horizon states only)
+        - value_c: List of cost value estimates (first evaluation_horizon states only)
     """
     episode_data = {
         'rewards': [],
@@ -68,88 +50,152 @@ def rollout_policy(
         'value_c': []
     }
     
+    # Add eval critic data if double critic is enabled
+    if hasattr(policy, 'use_double_critic') and policy.use_double_critic:
+        episode_data['value_r_eval'] = []
+        episode_data['value_c_eval'] = []
+    
     num_envs = env.num_envs
     episodes_completed = 0
-    
+
+    pbar = tqdm(total=num_episodes, desc="Collecting episodes", unit="ep")
     while episodes_completed < num_episodes:
         obs, _ = env.reset()
         obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
         
-        episode_rewards = []
-        episode_costs = []
-        episode_dones = []
-        episode_obs = []
-        episode_value_r = []
-        episode_value_c = []
+        # Track which environments have already been stored
+        stored_envs = set()
         
-        for _ in range(max_ep_len):
+        # Per-environment episode data
+        env_episode_data = {i: {
+            'rewards': [],
+            'costs': [],
+            'dones': [],
+            'obs': [],
+            'value_r': [],
+            'value_c': [],
+            'value_r_eval': [],
+            'value_c_eval': []
+        } for i in range(num_envs)}
+        
+        for step in range(max_ep_len):
             with torch.no_grad():
                 risk = torch.exp(risk_model(obs)) if use_risk else None
                 _, _, value_r, value_c = policy.step(obs, risk, deterministic=True)
-            
-            episode_obs.append(obs)
-            episode_value_r.append(value_r)
-            episode_value_c.append(value_c)
+                
+                # Get eval critic values if double critic is enabled
+                if hasattr(policy, 'use_double_critic') and policy.use_double_critic:
+                    value_r_eval, value_c_eval = policy.get_eval_values(obs, risk)
             
             action = policy.actor(obs, risk).sample()
+            # Vector envs expect numpy actions; avoid numpy * Tensor type errors.
+            action_np = action.detach().cpu().numpy()
+
             if "Safe" in args.task:
-                next_obs, reward, cost, terminated, truncated, _ = env.step(
-                    action.detach().cpu().numpy()
-                )
+                next_obs, reward, cost, terminated, truncated, info = env.step(action_np)
+                success = 0
             else:
-                next_obs, reward, terminated, truncated, info = env.step(
-                    action.detach().cpu().numpy()
-                )
+                next_obs, reward, terminated, truncated, info = env.step(action_np)
                 try:
                     cost = info["cost"]
+                    success = info["success"]
                 except:
                     cost = terminated
-                
-            episode_rewards.append(torch.as_tensor(reward, dtype=torch.float32, device=device))
-            episode_costs.append(torch.as_tensor(cost, dtype=torch.float32, device=device))
-            episode_dones.append(torch.as_tensor(terminated | truncated, dtype=torch.float32, device=device))
+                    success = 0 
+            
+            # Store data for each environment
+            reward_t = torch.as_tensor(reward, dtype=torch.float32, device=device)
+            cost_t = torch.as_tensor(cost, dtype=torch.float32, device=device)
+            done_t = torch.as_tensor(terminated | truncated, dtype=torch.float32, device=device)
+            
+            for env_idx in range(num_envs):
+                if env_idx not in stored_envs:
+                    # Store all rewards/costs/dones for full trajectory (needed for MC computation)
+                    env_episode_data[env_idx]['rewards'].append(reward_t[env_idx])
+                    env_episode_data[env_idx]['costs'].append(cost_t[env_idx])
+                    env_episode_data[env_idx]['dones'].append(done_t[env_idx])
+                    
+                    # Only store observations and value estimates for first evaluation_horizon states
+                    if step < evaluation_horizon:
+                        env_episode_data[env_idx]['obs'].append(obs[env_idx])
+                        env_episode_data[env_idx]['value_r'].append(value_r[env_idx])
+                        env_episode_data[env_idx]['value_c'].append(value_c[env_idx])
+                        if hasattr(policy, 'use_double_critic') and policy.use_double_critic:
+                            env_episode_data[env_idx]['value_r_eval'].append(value_r_eval[env_idx])
+                            env_episode_data[env_idx]['value_c_eval'].append(value_c_eval[env_idx])
             
             obs = torch.as_tensor(next_obs, dtype=torch.float32, device=device)
             
-            # Check which environments are done
+            # Check which environments are done and store their data
             done_envs = (terminated | truncated).nonzero()[0]
             for env_idx in done_envs:
-                if episodes_completed < num_episodes:
-                    # Extract and store the episode data for this environment
-                    episode_data['rewards'].append(torch.stack([r[env_idx] for r in episode_rewards]))
-                    episode_data['costs'].append(torch.stack([c[env_idx] for c in episode_costs]))
-                    episode_data['dones'].append(torch.stack([d[env_idx] for d in episode_dones]))
-                    episode_data['obs'].append(torch.stack([o[env_idx] for o in episode_obs]))
-                    episode_data['value_r'].append(torch.stack([vr[env_idx] for vr in episode_value_r]))
-                    episode_data['value_c'].append(torch.stack([vc[env_idx] for vc in episode_value_c]))
+                env_idx = env_idx.item()
+                if env_idx not in stored_envs and episodes_completed < num_episodes:
+                    # Store full trajectory for MC computation, but only first evaluation_horizon for value estimates
+                    episode_data['rewards'].append(torch.stack(env_episode_data[env_idx]['rewards']))
+                    episode_data['costs'].append(torch.stack(env_episode_data[env_idx]['costs']))
+                    episode_data['dones'].append(torch.stack(env_episode_data[env_idx]['dones']))
+                    # Only store first evaluation_horizon observations and value estimates
+                    episode_data['obs'].append(torch.stack(env_episode_data[env_idx]['obs']))
+                    episode_data['value_r'].append(torch.stack(env_episode_data[env_idx]['value_r']))
+                    episode_data['value_c'].append(torch.stack(env_episode_data[env_idx]['value_c']))
+                    if hasattr(policy, 'use_double_critic') and policy.use_double_critic:
+                        episode_data['value_r_eval'].append(torch.stack(env_episode_data[env_idx]['value_r_eval']))
+                        episode_data['value_c_eval'].append(torch.stack(env_episode_data[env_idx]['value_c_eval']))
+                    stored_envs.add(env_idx)
                     episodes_completed += 1
-            
+                    pbar.update(1)
+
             if episodes_completed >= num_episodes:
                 break
             
             if (terminated | truncated).all():
                 break
-                
+        
+        # Handle case where episode reaches max_ep_len without termination
+        # Store data for environments that haven't been stored yet
+        for env_idx in range(num_envs):
+            if env_idx not in stored_envs and episodes_completed < num_episodes:
+                # Store full trajectory for MC computation, but only first evaluation_horizon for value estimates
+                episode_data['rewards'].append(torch.stack(env_episode_data[env_idx]['rewards']))
+                episode_data['costs'].append(torch.stack(env_episode_data[env_idx]['costs']))
+                episode_data['dones'].append(torch.stack(env_episode_data[env_idx]['dones']))
+                # Only store first evaluation_horizon observations and value estimates
+                episode_data['obs'].append(torch.stack(env_episode_data[env_idx]['obs']))
+                episode_data['value_r'].append(torch.stack(env_episode_data[env_idx]['value_r']))
+                episode_data['value_c'].append(torch.stack(env_episode_data[env_idx]['value_c']))
+                if hasattr(policy, 'use_double_critic') and policy.use_double_critic:
+                    episode_data['value_r_eval'].append(torch.stack(env_episode_data[env_idx]['value_r_eval']))
+                    episode_data['value_c_eval'].append(torch.stack(env_episode_data[env_idx]['value_c_eval']))
+                episodes_completed += 1
+                pbar.update(1)
+
         if episodes_completed >= num_episodes:
             break
-            
+
+    pbar.close()
+    # print(torch.sum(torch.stack(episode_data["costs"])))
     return episode_data
 
 def calculate_monte_carlo_returns_from_rollouts(
     episode_data: Dict[str, List[torch.Tensor]],
-    gamma: float = 0.99
+    gamma: float = 0.99,
+    evaluation_horizon: int = 1000
 ) -> Dict[str, List[torch.Tensor]]:
     """
     Calculate Monte Carlo returns from rollout data.
+    Computes returns for first evaluation_horizon states using a fixed horizon of evaluation_horizon steps.
+    This ensures fair comparison: both MC estimates and value function estimates use the same horizon length.
     
     Args:
         episode_data: Dictionary containing lists of tensors from rollout_policy
         gamma: Discount factor
+        evaluation_horizon: Number of states to compute returns for (first N states) and horizon length
         
     Returns:
         Dictionary containing lists of tensors for:
-        - reward_returns: List of reward return sequences
-        - cost_returns: List of cost return sequences
+        - reward_returns: List of reward return sequences (first evaluation_horizon states only)
+        - cost_returns: List of cost return sequences (first evaluation_horizon states only)
     """
     returns = {
         'reward_returns': [],
@@ -157,22 +203,39 @@ def calculate_monte_carlo_returns_from_rollouts(
     }
     
     for ep_idx in range(len(episode_data['rewards'])):
-        rewards = episode_data['rewards'][ep_idx]
-        costs = episode_data['costs'][ep_idx]
-        dones = episode_data['dones'][ep_idx]
+        rewards = episode_data['rewards'][ep_idx]  # Full trajectory
+        costs = episode_data['costs'][ep_idx]  # Full trajectory
+        dones = episode_data['dones'][ep_idx]  # Full trajectory
         
-        seq_len = len(rewards)
-        reward_returns = torch.zeros_like(rewards)
-        cost_returns = torch.zeros_like(costs)
+        full_seq_len = len(rewards)
+        # Number of states to compute returns for (first evaluation_horizon states)
+        num_eval_states = min(evaluation_horizon, full_seq_len)
         
-        # Calculate returns from end to start
-        for t in range(seq_len-1, -1, -1):
-            if t == seq_len-1:
-                reward_returns[t] = rewards[t]
-                cost_returns[t] = costs[t]
-            else:
-                reward_returns[t] = rewards[t] + gamma * (1 - dones[t]) * reward_returns[t+1]
-                cost_returns[t] = costs[t] + gamma * (1 - dones[t]) * cost_returns[t+1]
+        # Initialize return tensors for first evaluation_horizon states
+        reward_returns = torch.zeros(num_eval_states, device=rewards.device, dtype=rewards.dtype)
+        cost_returns = torch.zeros(num_eval_states, device=costs.device, dtype=costs.dtype)
+        
+        # For each state t in [0, num_eval_states), compute return using fixed horizon
+        for t in range(num_eval_states):
+            # Compute return with fixed horizon of evaluation_horizon steps
+            # Use rewards from t to t+horizon (or until episode ends)
+            horizon = evaluation_horizon
+            end_idx = min(t + horizon, full_seq_len)
+            
+            # Compute discounted return from t to end_idx
+            reward_return = torch.tensor(0.0, device=rewards.device, dtype=rewards.dtype)
+            cost_return = torch.tensor(0.0, device=costs.device, dtype=costs.dtype)
+            
+            for i in range(t, end_idx):
+                discount_factor = gamma ** (i - t)
+                reward_return += discount_factor * rewards[i]
+                cost_return += discount_factor * costs[i]
+                # If episode ended at step i, stop accumulating (don't include future rewards)
+                if dones[i].item() > 0:
+                    break
+            
+            reward_returns[t] = reward_return
+            cost_returns[t] = cost_return
         
         returns['reward_returns'].append(reward_returns)
         returns['cost_returns'].append(cost_returns)
@@ -215,7 +278,8 @@ def create_value_scatter_plot(
     value_estimates: torch.Tensor,
     monte_carlo_returns: torch.Tensor,
     title: str,
-    timesteps: Optional[torch.Tensor] = None
+    color_values: Optional[torch.Tensor] = None,
+    color_label: str = ""
 ) -> plt.Figure:
     """
     Create a scatter plot comparing value estimates and MC returns.
@@ -224,7 +288,6 @@ def create_value_scatter_plot(
         value_estimates: Tensor of predicted values
         monte_carlo_returns: Tensor of Monte Carlo returns
         title: Plot title
-        timesteps: Optional tensor of timesteps for coloring points
         
     Returns:
         matplotlib Figure object for wandb logging
@@ -232,22 +295,22 @@ def create_value_scatter_plot(
     # Convert to numpy
     values_np = value_estimates.detach().cpu().numpy().flatten()
     returns_np = monte_carlo_returns.detach().cpu().numpy().flatten()
+    color_np = (
+        color_values.detach().cpu().numpy().flatten()
+        if color_values is not None
+        else None
+    )
     
     # Create figure
     fig = plt.figure(figsize=(10, 8))
     
-    if timesteps is not None:
-        # Convert timesteps to numpy and flatten
-        timesteps_np = timesteps.detach().cpu().numpy().flatten()
-        
-        # Create scatter plot with timestep-based coloring
-        scatter = plt.scatter(returns_np, values_np, c=timesteps_np, alpha=0.6, cmap='viridis')
-        
-        # Add colorbar
-        cbar = plt.colorbar(scatter)
-        cbar.set_label('Timestep')
+    # Create scatter plot with optional color coding
+    if color_np is not None:
+        scatter = plt.scatter(
+            returns_np, values_np, c=color_np, alpha=0.25, cmap="turbo", s=10
+        )
+        plt.colorbar(scatter, label=color_label or "Value Discrepancy (Main - Eval)")
     else:
-        # Create scatter plot without coloring
         plt.scatter(returns_np, values_np, alpha=0.2)
     
     # Calculate correlations
@@ -257,6 +320,68 @@ def create_value_scatter_plot(
     plt.title(f'{title}\nPearson: {corr["pearson_corr"]:.3f}, Spearman: {corr["spearman_corr"]:.3f}')
     plt.xlabel('Monte Carlo Returns')
     plt.ylabel('Predicted Values')
+    # plt.legend()
+    
+    return fig
+
+def create_critic_comparison_plot(
+    main_critic_values: torch.Tensor,
+    eval_critic_values: torch.Tensor,
+    title: str,
+    value_type: str = "Reward"
+) -> plt.Figure:
+    """
+    Create a scatter plot comparing predictions from main critic vs eval critic.
+    
+    Args:
+        main_critic_values: Tensor of values from main critic (used for policy updates)
+        eval_critic_values: Tensor of values from eval critic (not used for policy updates)
+        title: Plot title
+        value_type: Type of value being compared ("Reward" or "Cost")
+        
+    Returns:
+        matplotlib Figure object for wandb logging
+    """
+    # Convert to numpy
+    main_np = main_critic_values.detach().cpu().numpy().flatten()
+    eval_np = eval_critic_values.detach().cpu().numpy().flatten()
+    
+    # Calculate discrepancy
+    discrepancy = main_np - eval_np
+    mean_discrepancy = np.mean(discrepancy)
+    std_discrepancy = np.std(discrepancy)
+    
+    # Create figure
+    fig = plt.figure(figsize=(10, 8))
+    
+    # Create scatter plot with color coding by discrepancy
+    scatter = plt.scatter(main_np, eval_np, c=discrepancy, alpha=0.4, cmap='seismic', s=10)
+    plt.colorbar(scatter, label='Discrepancy (Main - Eval)')
+    
+    # Add diagonal line (y=x) for perfect agreement
+    min_val = min(main_np.min(), eval_np.min())
+    max_val = max(main_np.max(), eval_np.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=2, label='Perfect Agreement (y=x)')
+    
+    # Calculate correlation
+    corr = calculate_correlation(main_critic_values, eval_critic_values)
+    
+    # Add title and labels
+    plt.title(f'{title}\nMean Discrepancy: {mean_discrepancy:.4f} ± {std_discrepancy:.4f}\n'
+              f'Pearson: {corr["pearson_corr"]:.3f}, Spearman: {corr["spearman_corr"]:.3f}')
+    plt.xlabel(f'Main Critic {value_type} Value (used for policy updates)', fontsize=11)
+    plt.ylabel(f'Eval Critic {value_type} Value (evaluation only)', fontsize=11)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Add text annotation about interpretation
+    if mean_discrepancy > 0:
+        bias_text = f'Main critic overestimates by {mean_discrepancy:.4f} on average'
+    else:
+        bias_text = f'Main critic underestimates by {abs(mean_discrepancy):.4f} on average'
+    
+    plt.text(0.05, 0.95, bias_text, transform=plt.gca().transAxes,
+             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
     return fig
 
@@ -266,7 +391,8 @@ def evaluate_value_estimation_error(
     mask: Optional[torch.Tensor] = None,
     create_plot: bool = False,
     plot_title: str = "",
-    timesteps: Optional[torch.Tensor] = None
+    color_values: Optional[torch.Tensor] = None,
+    color_label: str = ""
 ) -> Dict[str, float]:
     """
     Calculate metrics to evaluate value function estimation bias.
@@ -277,7 +403,6 @@ def evaluate_value_estimation_error(
         mask: Optional tensor to mask certain timesteps
         create_plot: Whether to create scatter plot
         plot_title: Title for the scatter plot
-        timesteps: Optional tensor of timesteps for coloring points
         
     Returns:
         Dictionary containing evaluation metrics and optionally the plot figure
@@ -285,8 +410,8 @@ def evaluate_value_estimation_error(
     if mask is not None:
         value_estimates = value_estimates[mask]
         monte_carlo_returns = monte_carlo_returns[mask]
-        if timesteps is not None:
-            timesteps = timesteps[mask]
+        if color_values is not None:
+            color_values = color_values[mask]
     
     # Calculate errors
     errors = value_estimates - monte_carlo_returns
@@ -313,7 +438,8 @@ def evaluate_value_estimation_error(
             value_estimates,
             monte_carlo_returns,
             plot_title,
-            timesteps
+            color_values=color_values,
+            color_label=color_label
         )
     
     # Calculate value statistics
@@ -329,6 +455,7 @@ def evaluate_value_estimation_error(
     }
     
     result = {
+        'error': errors,
         'mean_error': mean_error,
         'mean_abs_error': mean_abs_error,
         'overestimation_ratio': overestimation_ratio,
@@ -353,7 +480,8 @@ def evaluate_critic_performance_from_rollouts(
     gamma: float = 0.99,
     use_risk: bool = False,
     risk_model = None,
-    create_plots: bool = False
+    create_plots: bool = False,
+    evaluation_horizon: int = 1000
 ) -> Dict[str, Dict[str, float]]:
     """
     Evaluate critic performance using Monte Carlo returns from fresh rollouts.
@@ -362,45 +490,53 @@ def evaluate_critic_performance_from_rollouts(
         policy: The policy to evaluate
         env: The environment to rollout in
         num_episodes: Number of episodes to rollout
-        max_ep_len: Maximum episode length
+        max_ep_len: Maximum episode length (full rollout length)
         device: Device to run computations on
         gamma: Discount factor
         use_risk: Whether to use risk estimation
         risk_model: Risk estimation model if use_risk is True
         create_plots: Whether to create scatter plots
+        evaluation_horizon: Number of states to evaluate (first N states)
         
     Returns:
-        Dictionary containing evaluation metrics for both reward and cost critics
+        Dictionary containing evaluation metrics for both reward and cost critics,
+        and discrepancy metrics if double critic is enabled
     """
     # Collect rollout data
     episode_data = rollout_policy(
-        args, policy, env, num_episodes, max_ep_len, device, use_risk, risk_model
+        args, policy, env, num_episodes, max_ep_len, device, use_risk, risk_model, evaluation_horizon
     )
     
     # Calculate Monte Carlo returns
-    returns = calculate_monte_carlo_returns_from_rollouts(episode_data, gamma)
+    returns = calculate_monte_carlo_returns_from_rollouts(episode_data, gamma, evaluation_horizon)
     
     # Flatten all episodes for evaluation
     all_value_r = torch.cat(episode_data['value_r'])
     all_value_c = torch.cat(episode_data['value_c'])
     all_reward_returns = torch.cat(returns['reward_returns'])
     all_cost_returns = torch.cat(returns['cost_returns'])
+
+    # Optional discrepancy for color-coding if double critic is enabled
+    reward_color_values = None
+    cost_color_values = None
+    if hasattr(policy, 'use_double_critic') and policy.use_double_critic and 'value_r_eval' in episode_data:
+        all_value_r_eval = torch.cat(episode_data['value_r_eval'])
+        all_value_c_eval = torch.cat(episode_data['value_c_eval'])
+        reward_color_values = torch.abs(all_value_r - all_value_r_eval)
+        cost_color_values = torch.abs(all_value_c - all_value_c_eval)
     
-    # Create timestep information for coloring
-    timesteps_list = []
-    for ep_idx, episode_values in enumerate(episode_data['value_r']):
-        seq_len = len(episode_values)
-        episode_timesteps = torch.arange(seq_len, device=device)
-        timesteps_list.append(episode_timesteps)
-    all_timesteps = torch.cat(timesteps_list)
-    
+
+
+
+
     # Evaluate reward critic
     reward_metrics = evaluate_value_estimation_error(
         all_value_r,
         all_reward_returns,
         create_plot=create_plots,
         plot_title="Reward Value Estimates vs MC Returns",
-        timesteps=all_timesteps
+        color_values=reward_color_values,
+        color_label="Reward Discrepancy |Main - Eval|"
     )
     
     # Evaluate cost critic
@@ -409,13 +545,80 @@ def evaluate_critic_performance_from_rollouts(
         all_cost_returns,
         create_plot=create_plots,
         plot_title="Cost Value Estimates vs MC Returns",
-        timesteps=all_timesteps
+        color_values=cost_color_values,
+        color_label="Cost Discrepancy |Main - Eval|"
     )
     
-    return {
+    # Calculate correlation between std and estimation error (if double critic is enabled)
+    if reward_color_values is not None and cost_color_values is not None:
+        reward_std_error_corr = calculate_correlation(reward_color_values, reward_metrics['error'])
+        cost_std_error_corr = calculate_correlation(cost_color_values, cost_metrics['error'])
+    else:
+        # Return empty correlation dict if double critic is not enabled
+        reward_std_error_corr = {'pearson_corr': 0.0, 'spearman_corr': 0.0, 'kendall_corr': 0.0}
+        cost_std_error_corr = {'pearson_corr': 0.0, 'spearman_corr': 0.0, 'kendall_corr': 0.0}
+
+    reward_metrics['std_error_corr'] = reward_std_error_corr
+    cost_metrics['std_error_corr'] = cost_std_error_corr
+    result = {
         'reward_critic': reward_metrics,
         'cost_critic': cost_metrics
     }
+    
+    # Compute discrepancies between main and eval critics if double critic is enabled
+    if hasattr(policy, 'use_double_critic') and policy.use_double_critic and 'value_r_eval' in episode_data:
+        
+        # Discrepancy = main_critic - eval_critic
+        # Positive means main critic overestimates relative to eval critic
+        reward_discrepancy = all_value_r - all_value_r_eval
+        cost_discrepancy = all_value_c - all_value_c_eval
+        
+        reward_discrepancy_metrics = {
+            'mean_discrepancy': reward_discrepancy.mean().item(),
+            'std_discrepancy': reward_discrepancy.std().item(),
+            'mean_abs_discrepancy': torch.abs(reward_discrepancy).mean().item(),
+            'max_discrepancy': reward_discrepancy.max().item(),
+            'min_discrepancy': reward_discrepancy.min().item(),
+            'overestimate_ratio': (reward_discrepancy > 0).float().mean().item(),
+            'underestimate_ratio': (reward_discrepancy < 0).float().mean().item(),
+            'mean_main_value': all_value_r.mean().item(),
+            'mean_eval_value': all_value_r_eval.mean().item(),
+        }
+        
+        cost_discrepancy_metrics = {
+            'mean_discrepancy': cost_discrepancy.mean().item(),
+            'std_discrepancy': cost_discrepancy.std().item(),
+            'mean_abs_discrepancy': torch.abs(cost_discrepancy).mean().item(),
+            'max_discrepancy': cost_discrepancy.max().item(),
+            'min_discrepancy': cost_discrepancy.min().item(),
+            'overestimate_ratio': (cost_discrepancy > 0).float().mean().item(),
+            'underestimate_ratio': (cost_discrepancy < 0).float().mean().item(),
+            'mean_main_value': all_value_c.mean().item(),
+            'mean_eval_value': all_value_c_eval.mean().item(),
+        }
+        
+        # Create comparison scatter plots
+        if create_plots:
+            reward_comparison_fig = create_critic_comparison_plot(
+                all_value_r,
+                all_value_r_eval,
+                title=f"Reward Critic Comparison: Main vs Eval",
+                value_type="Reward"
+            )
+            reward_discrepancy_metrics['comparison_plot'] = reward_comparison_fig
+            
+            cost_comparison_fig = create_critic_comparison_plot(
+                all_value_c,
+                all_value_c_eval,
+                title=f"Cost Critic Comparison: Main vs Eval",
+                value_type="Cost"
+            )
+            cost_discrepancy_metrics['comparison_plot'] = cost_comparison_fig
+        
+        result['reward_discrepancy'] = reward_discrepancy_metrics
+        result['cost_discrepancy'] = cost_discrepancy_metrics
+    
+    return result
 
 # Keep the original functions for backward compatibility
 def calculate_monte_carlo_returns(
@@ -453,8 +656,7 @@ def calculate_monte_carlo_returns(
 
 def evaluate_critic_performance(
     buffer_data: Dict[str, torch.Tensor],
-    gamma: float = 0.99,
-    create_plots: bool = False
+    gamma: float = 0.99
 ) -> Dict[str, Dict[str, float]]:
     """
     Evaluate both reward and cost critic performance using Monte Carlo returns.
@@ -467,7 +669,6 @@ def evaluate_critic_performance(
             - 'value_r': Tensor of reward value estimates
             - 'value_c': Tensor of cost value estimates
         gamma: Discount factor
-        create_plots: Whether to create scatter plots with timestep coloring
         
     Returns:
         Dictionary containing evaluation metrics for both reward and cost critics
@@ -480,485 +681,19 @@ def evaluate_critic_performance(
         gamma
     )
     
-    # Create timestep information for coloring if plots are requested
-    timesteps = None
-    if create_plots:
-        batch_size, seq_len = buffer_data['reward'].shape
-        timesteps = torch.arange(seq_len, device=buffer_data['reward'].device).unsqueeze(0).expand(batch_size, seq_len)
-    
     # Evaluate reward critic
     reward_metrics = evaluate_value_estimation_error(
         buffer_data['value_r'],
-        reward_returns,
-        create_plot=create_plots,
-        plot_title="Reward Value Estimates vs MC Returns",
-        timesteps=timesteps
+        reward_returns
     )
     
     # Evaluate cost critic
     cost_metrics = evaluate_value_estimation_error(
         buffer_data['value_c'],
-        cost_returns,
-        create_plot=create_plots,
-        plot_title="Cost Value Estimates vs MC Returns",
-        timesteps=timesteps
+        cost_returns
     )
     
     return {
         'reward_critic': reward_metrics,
         'cost_critic': cost_metrics
     } 
-import os
-import pickle
-import torch
-import numpy as np
-from random import shuffle
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
-
-import tqdm
-
-def train_risk(model, dataloader, criterion, opt, num_epochs, device):
-    model.train()
-    net_loss = 0
-    for _ in tqdm.tqdm(range(num_epochs)):
-        for batch in dataloader:
-                pred = model(batch[0].to(device))
-                loss = criterion(pred, torch.argmax(batch[1].squeeze(), axis=1).to(device))
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
-                net_loss += loss.item()
-    torch.save(model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
-    wandb.save("risk_model.pt")
-    model.eval()
-    return net_loss
-
-
-
-
-
-def make_dirs(traj_path, episode):
-        #try:
-        os.makedirs(os.path.join(traj_path, "traj_%d"%episode, "lidar"))
-        os.makedirs(os.path.join(traj_path, "traj_%d"%episode, "info"))
-        
-        #except:
-        #    pass
-
-
-def compute_fear(costs, max_dist=1000):
-        fear_fwd, fear_bwd = torch.full(costs.size(), max_dist), torch.full(costs.size(), max_dist)
-        fwd_flag, bwd_flag = 0, 0
-        fwd_counter, bwd_counter = 0, 0
-        len_run = len(costs)
-        for i in range(len_run):
-                if costs[i] == 1:
-                        fear_fwd[i] = 0
-                        fwd_flag = 1
-                        fwd_counter = 0
-                elif fwd_flag:
-                       fwd_counter += 1
-                       fear_fwd[i] = fwd_counter
-
-                if costs[len_run-i-1] == 1:
-                        bwd_flag = 1
-                        fear_bwd[len_run-i-1] = 0
-                        bwd_counter = 0
-                elif bwd_flag:
-                       bwd_counter += 1
-                       fear_bwd[len_run-i-1] = bwd_counter
-        return torch.min(fear_fwd, fear_bwd)
-
-                     
-
-
-def store_data(next_obs, info_dict, traj_path, episode, step_log):
-        #, 'prev_obs_rgb': obs['vision']}
-        #info_dict.update(obs)
-        ## Saving the info for this step
-        f1 = open(os.path.join(traj_path, "traj_%d"%episode, "info", "%d.pkl"%step_log), "wb")
-        pickle.dump(info_dict, f1, protocol=pickle.HIGHEST_PROTOCOL)
-        f1.close()
-        # del obs['vision']
-        ## Saving data from other sensors (particularly lidar)
-        f2 = open(os.path.join(traj_path, "traj_%d"%episode, "lidar", "%d.pkl"%step_log), "wb")
-        pickle.dump(next_obs, f2, protocol=pickle.HIGHEST_PROTOCOL)
-        f2.close()
-
-
-def get_activation(name):
-    activation_dict = {
-        'relu': nn.ReLU(),
-        "sigmoid": nn.Sigmoid(),
-        "tanh": nn.Tanh(),
-        "softmax": nn.Softmax(dim=1),
-        "logsoftmax": nn.LogSoftmax(dim=1),
-    }
-
-    return activation_dict[name]
-
-
-
-def make_state_action_risk_data(data_path):
-        obs = torch.load(os.path.join(data_path, "obs.pt"))
-        actions = torch.load(os.path.join(data_path, "actions.pt"))
-        risks = torch.load(os.path.join(data_path, "risks.pt"))
-        ep_len = torch.load(os.path.join(data_path, "ep_len.pt"))
-        state_action_risk_data = None
-        for idx in range(1, len(ep_len)):
-                start, end = int(ep_len[idx-1]), int(ep_len[idx])
-                print(start, end)
-                obs_idx = obs[start:end]
-                actions_idx = actions[start:end]
-                risks_idx = risks[start:end]
-                print(obs_idx.size(), actions_idx.size(), risks_idx.size())
-                sar_data = torch.cat([obs_idx[:-1], actions_idx[1:], risks_idx[1:]], axis=1)
-                state_action_risk_data = sar_data if state_action_risk_data is None else torch.cat([state_action_risk_data, sar_data], axis=0)
-        torch.save(state_action_risk_data, os.path.join(data_path, "state_action_risk.pt"))
-        return state_action_risk_data
-
-def make_state_risk_data(data_path):
-        obs = torch.load(os.path.join(data_path, "obs.pt"))
-        risks = torch.load(os.path.join(data_path, "risks.pt"))
-        ep_len = torch.load(os.path.join(data_path, "ep_len.pt"))
-        return torch.cat([obs, risks], axis=1)
-
-def combine_data(data_path, type="state_risk"):
-        for env in os.listdir(data_path):
-                env_path = os.path.join(data_path, env)
-                all_data = None
-                for run in os.listdir(env_path):
-                        run_path = os.path.join(env_path, run)
-                        if type == "state_risk":
-                                try:
-                                        data = make_state_risk_data(run_path)
-                                except:
-                                        pass
-                        else:
-                                try:
-                                        data = make_state_action_risk_data(run_path)
-                                except:
-                                        pass
-                all_data = data if all_data is None else torch.cat([all_data, data], axis=0)
-        torch.save(all_data, os.path.join(env_path, "all_%s.pt"%type))
-
-
-
-class ReplayBuffer:
-        def __init__(self, buffer_size, obs_dim, risk_size, device):
-                self.obs = None
-                self.next_obs = torch.zeros(buffer_size, obs_dim).to(device)
-                self.actions = None
-                self.rewards = None
-                self.dones = None
-                self.risks = torch.zeros(buffer_size, risk_size).to(device)
-                self.dist_to_fails = torch.zeros(buffer_size, 1).to(device)
-                self.costs = None
-                #self.data_path = data_path
-                self.buffer_size = buffer_size
-                self.buff_fill = 0
-
-        def add(self, obs, next_obs, action, reward, done, cost, risk, dist_to_fail):
-                data_size = next_obs.size()[0]
-                self.next_obs[self.buff_fill:self.buff_fill+data_size, :] = next_obs.squeeze()
-                self.risks[self.buff_fill:self.buff_fill+data_size, :] = risk.squeeze()
-                self.dist_to_fails[self.buff_fill:self.buff_fill+data_size, :] = dist_to_fail.reshape(-1, 1)
-                self.buff_fill += data_size
-
-                #self.obs = obs if self.obs is None else torch.concat([self.obs, obs], axis=0)
-                #self.next_obs = next_obs if self.next_obs is None else torch.concat([self.next_obs, next_obs], axis=0)
-                #self.actions = action if self.actions is None else torch.concat([self.actions, action], axis=0)
-                #self.rewards = reward if self.rewards is None else torch.concat([self.rewards, reward], axis=0)
-                #self.dones = done if self.dones is None else torch.concat([self.dones, done], axis=0)
-                #self.risks = risk if self.risks is None else torch.concat([self.risks, risk], axis=0)
-                #self.costs = cost if self.costs is None else torch.concat([self.costs, cost], axis=0)
-                #self.dist_to_fails = dist_to_fail if self.dist_to_fails is None else torch.concat([self.dist_to_fails, dist_to_fail], axis=0)
-
-        def __len__(self):
-            return self.buff_fill
-
-        def sample(self, sample_size):
-                #if self.next_obs.size()[0] > self.buffer_size:
-                #    self.next_obs = self.next_obs[-self.buffer_size:]
-                #    self.risks = self.risks[-self.buffer_size:]
-                sample_idx = np.random.randint(1, self.buff_fill, size=sample_size)
-                return {"obs": None, #self.obs[sample_idx],
-                        "next_obs": self.next_obs[sample_idx],
-                        "actions": None, #self.actions[sample_idx],
-                        "rewards": None, #self.rewards[sample_idx],
-                        "dones": None, #self.dones[sample_idx],
-                        "risks": self.risks[sample_idx],
-                        "costs": None, #self.costs[sample_idx],
-                        "dist_to_fail": self.dist_to_fails[sample_idx]}
-        
-        def sample_balanced(self, sample_size):
-                idx = range(self.obs.size()[0])
-                print(self.risks.size())
-                
-                idx_risky = idx[torch.argmax(self.risks, 1).squeeze().cpu().numpy() == 1]
-                idx_safe  = idx[torch.argmax(self.risks, 1).squeeze().cpu().numpy() == 0]
-                sample_idx = np.array(list(np.random.choice(idx_risky, sample_size/2)) + list(np.random.choice(idx_safe, sample_size/2)))
-                return {"obs": self.obs[sample_idx],
-                        "next_obs": self.next_obs[sample_idx],
-                        "actions": self.actions[sample_idx],
-                        "rewards": self.rewards[sample_idx],
-                        "dones": self.dones[sample_idx],
-                        "risks": self.risks[sample_idx], 
-                        "costs": self.costs[sample_idx],
-                        "dist_to_fail": self.dist_to_fails[sample_idx]}
-                  
-
-        def slice_data(self, min_idx, max_idx):
-                idx = range(min_idx, max_idx)
-                sample_idx = idx #np.random.choice(idx, sample_size)
-                return {"obs": self.obs[sample_idx],
-                        "next_obs": self.next_obs[sample_idx],
-                        "actions": self.actions[sample_idx],
-                        "rewards": self.rewards[sample_idx],
-                        "dones": self.dones[sample_idx],
-                        "risks": self.risks[sample_idx], 
-                        "costs": self.costs[sample_idx],
-                        "dist_to_fail": self.dist_to_fails[sample_idx]}        
-
-        def save(self):
-            torch.save(self.next_obs, os.path.join(self.data_path, "all_obs.pt"))
-            torch.save(self.risks, os.path.join(self.data_path, "all_risks.pt"))
-
-
-
-class ReplayBufferBalanced:
-        def __init__(self, buffer_size=100000):
-                self.obs_risky = None 
-                self.next_obs_risky = None
-                self.actions_risky = None 
-                self.rewards_risky = None 
-                self.dones_risky = None
-                self.risks_risky = None 
-                self.dist_to_fails_risky = None 
-                self.costs_risky = None
-
-                self.obs_safe = None 
-                self.next_obs_safe = None
-                self.actions_safe = None 
-                self.rewards_safe = None 
-                self.dones_safe = None
-                self.risks_safe = None 
-                self.dist_to_fails_safe = None 
-                self.costs_safe = None
-
-        def add_risky(self, obs, next_obs, action, reward, done, cost, risk, dist_to_fail):
-                self.obs_risky = obs if self.obs_risky is None else torch.concat([self.obs_risky, obs], axis=0)
-                self.next_obs_risky = next_obs if self.next_obs_risky is None else torch.concat([self.next_obs_risky, next_obs], axis=0)
-                self.actions_risky = action if self.actions_risky is None else torch.concat([self.actions_risky, action], axis=0)
-                self.rewards_risky = reward if self.rewards_risky is None else torch.concat([self.rewards_risky, reward], axis=0)
-                self.dones_risky = done if self.dones_risky is None else torch.concat([self.dones_risky, done], axis=0)
-                self.risks_risky = risk if self.risks_risky is None else torch.concat([self.risks_risky, risk], axis=0)
-                self.costs_risky = cost if self.costs_risky is None else torch.concat([self.costs_risky, cost], axis=0)
-                self.dist_to_fails_risky = dist_to_fail if self.dist_to_fails_risky is None else torch.concat([self.dist_to_fails_risky, dist_to_fail], axis=0)
-
-        def add_safe(self, obs, next_obs, action, reward, done, cost, risk, dist_to_fail):
-                self.obs_safe = obs if self.obs_safe is None else torch.concat([self.obs_safe, obs], axis=0)
-                self.next_obs_safe = next_obs if self.next_obs_safe is None else torch.concat([self.next_obs_safe, next_obs], axis=0)
-                self.actions_safe = action if self.actions_safe is None else torch.concat([self.actions_safe, action], axis=0)
-                self.rewards_safe = reward if self.rewards_safe is None else torch.concat([self.rewards_safe, reward], axis=0)
-                self.dones_safe = done if self.dones_safe is None else torch.concat([self.dones_safe, done], axis=0)
-                self.risks_safe = risk if self.risks_safe is None else torch.concat([self.risks_safe, risk], axis=0)
-                self.costs_safe = cost if self.costs_safe is None else torch.concat([self.costs_safe, cost], axis=0)
-                self.dist_to_fails_safe = dist_to_fail if self.dist_to_fails_safe is None else torch.concat([self.dist_to_fails_safe, dist_to_fail], axis=0)
-
-        
-        def sample(self, sample_size):
-                idx_risky = range(self.obs_risky.size()[0])
-                idx_safe = range(self.obs_safe.size()[0])
-
-                sample_risky_idx = np.random.choice(idx_risky, int(sample_size/2))
-                sample_safe_idx = np.random.choice(idx_safe, int(sample_size/2))
-
-                return {"obs": torch.cat([self.obs_risky[sample_risky_idx], self.obs_safe[sample_safe_idx]], 0),
-                        "next_obs": torch.cat([self.next_obs_risky[sample_risky_idx], self.next_obs_safe[sample_safe_idx]], 0),
-                        "actions": torch.cat([self.actions_risky[sample_risky_idx], self.actions_safe[sample_safe_idx]], 0),
-                        "rewards": torch.cat([self.rewards_risky[sample_risky_idx], self.rewards_safe[sample_safe_idx]], 0),
-                        "dones": torch.cat([self.dones_risky[sample_risky_idx], self.dones_safe[sample_safe_idx]], 0),
-                        "risks": torch.cat([self.risks_risky[sample_risky_idx], self.risks_safe[sample_safe_idx]], 0),
-                        "costs": torch.cat([self.costs_risky[sample_risky_idx], self.costs_safe[sample_safe_idx]], 0),
-                        "dist_to_fail": torch.cat([self.dist_to_fails_risky[sample_risky_idx], self.dist_to_fails_safe[sample_safe_idx]], 0),}
-        
-
-
-
-                        
-
-                
-
-
-class BayesRiskEstCont(nn.Module):
-    def __init__(self, obs_size=64, fc1_size=128, fc2_size=128, fc3_size=128, fc4_size=128, out_size=1, model_type="state_risk", action_size=2):
-        super().__init__()
-        self.obs_size = obs_size
-        self.model_type = model_type
-        self.action_size = action_size
-
-        self.fc1 = nn.Linear(obs_size, fc1_size)
-        if self.model_type == "state_risk":
-            self.fc2 = nn.Linear(fc1_size, fc2_size)
-        else:
-            self.fc1_action = nn.Linear(action_size, int(fc1_size/2))
-            self.fc2 = nn.Linear(fc1_size + int(fc1_size/2), fc2_size)
-            self.bnorm1_action = nn.BatchNorm1d(int(fc1_size/2))
-
-        self.mean_fc3 = nn.Linear(fc2_size, fc3_size)
-        self.mean_fc4 = nn.Linear(fc3_size, fc4_size)
-        self.mean_out = nn.Linear(fc4_size, out_size)
-
-        self.logvar_fc3 = nn.Linear(fc2_size, fc3_size)
-        self.logvar_fc4 = nn.Linear(fc3_size, fc4_size)
-        self.logvar_out = nn.Linear(fc4_size, out_size)
-
-
-        ## Batch Norm layers
-        self.bnorm1 = nn.BatchNorm1d(fc1_size)
-        self.bnorm2 = nn.BatchNorm1d(fc2_size)
-        self.mean_bnorm3 = nn.BatchNorm1d(fc3_size)
-        self.mean_bnorm4 = nn.BatchNorm1d(fc4_size)
-
-        #self.var_bnorm1 = nn.BatchNorm1d(fc1_size)
-        #self.var_bnorm2 = nn.BatchNorm1d(fc2_size)
-        self.var_bnorm3 = nn.BatchNorm1d(fc3_size)
-        self.var_bnorm4 = nn.BatchNorm1d(fc4_size)
-
-        # Activation functions
-        self.relu = nn.ReLU()
-        self.sigmoid = nn.Sigmoid()
-        self.tanh = nn.Tanh()
-        self.softmax = nn.Softmax(dim=1)
-        self.dropout = nn.Dropout(0.2)
-        self.logsoftmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, x, action=None):
-        x = self.bnorm1(self.relu(self.fc1(x)))
-        if self.model_type == "state_action_risk":
-            x1 = self.bnorm1_action(self.relu(self.fc1_action(action)))
-            x = torch.cat([x, x1], axis=1)
-
-        x = self.bnorm2(self.relu(self.fc2(x)))
-
-        mean  = self.mean_bnorm3(self.relu(self.mean_fc3(x)))
-        mean  = self.mean_bnorm4(self.relu(self.mean_fc4(mean)))
-        mean  = self.sigmoid(self.mean_out(mean))
-
-        logvar = self.var_bnorm3(self.relu(self.logvar_fc3(x)))
-        logvar = self.var_bnorm4(self.relu(self.logvar_fc4(x)))
-        logvar = self.sigmoid(self.logvar_out(x))
-
-        #x = self.bnorm3(self.relu(self.dropout(self.fc3(x))))
-        #x = self.bnorm4(self.relu(self.dropout(self.fc4(x))))
-        #out = self.logsoftmax(self.out(x))
-        return mean, logvar
-
-
-
-class BayesRiskEst(nn.Module):
-    def __init__(self, obs_size=64, fc1_size=64, fc2_size=64,\
-                  fc3_size=64, fc4_size=64, out_size=2, batch_norm=True, activation='relu', model_type="state_risk", action_size=2):
-        super().__init__()
-        self.obs_size = obs_size
-        self.batch_norm = batch_norm
-        self.model_type = model_type
-        self.fc1 = nn.Linear(obs_size, fc1_size)
-        if self.model_type == "state_risk":
-            self.fc2 = nn.Linear(fc1_size, fc2_size)
-        else:
-            self.fc1_action = nn.Linear(action_size, int(fc1_size/2))
-            self.fc2 = nn.Linear(fc1_size + int(fc1_size/2), fc2_size)
-            self.bnorm1_action = nn.BatchNorm1d(int(fc1_size/2))
-
-        #self.fc2 = nn.Linear(fc1_size, fc2_size)
-        self.fc3 = nn.Linear(fc2_size, fc3_size)
-        self.fc4 = nn.Linear(fc3_size, fc4_size)
-        self.out = nn.Linear(fc4_size, out_size)
-
-        ## Batch Norm layers
-        self.bnorm1 = nn.BatchNorm1d(fc1_size)
-        self.bnorm2 = nn.BatchNorm1d(fc2_size)
-        self.bnorm3 = nn.BatchNorm1d(fc3_size)
-        self.bnorm4 = nn.BatchNorm1d(fc4_size)
-
-        # Activation functions
-        self.activation = get_activation(activation)
-
-        self.logsoftmax = get_activation("logsoftmax")
-        self.dropout = nn.Dropout(0.2)
-
-    def forward(self, x, action=None):
-        # Taking care of any augmentation in the observation space
-        x = x[:, :self.obs_size]
-        if self.batch_norm:
-            x = self.bnorm1(self.activation(self.fc1(x)))
-            if self.model_type == "state_action_risk":
-                x1 = self.bnorm1_action(self.activation(self.fc1_action(action)))
-                x = torch.cat([x, x1], axis=1)
-            #x = self.bnorm2(self.activation(self.fc2(x)))
-            # x = self.bnorm3(self.activation(self.dropout(self.fc3(x))))
-            x = self.bnorm4(self.activation(self.dropout(self.fc4(x))))
-        else:
-            x = self.activation(self.fc1(x))
-            if self.model_type == "state_action_risk":
-                x1 = self.activation(self.fc1_action(action))
-                x = torch.cat([x, x1], axis=1)
-
-            #x = self.activation(self.fc2(x))
-            # x = self.activation(self.dropout(self.fc3(x)))
-            x = self.activation(self.dropout(self.fc4(x)))
-
-        out = self.logsoftmax(self.out(x))
-        return out
-
-
-class RiskEst(nn.Module):
-    def __init__(self, obs_size=64, fc1_size=128, fc2_size=128,\
-                  fc3_size=128, fc4_size=128, out_size=2, batch_norm=False, activation='relu', continuous_risk=False):
-        super().__init__()
-        self.obs_size = obs_size
-        self.batch_norm = batch_norm
-        self.continuous_risk = continuous_risk
-
-        self.fc1 = nn.Linear(obs_size, fc1_size)
-        self.fc2 = nn.Linear(fc1_size, fc2_size)
-        self.fc3 = nn.Linear(fc2_size, fc3_size)
-        self.fc4 = nn.Linear(fc3_size, fc4_size)
-        self.out = nn.Linear(fc4_size, out_size)
-
-        ## Batch Norm layers
-        self.bnorm1 = nn.BatchNorm1d(fc1_size)
-        self.bnorm2 = nn.BatchNorm1d(fc2_size)
-        self.bnorm3 = nn.BatchNorm1d(fc3_size)
-        self.bnorm4 = nn.BatchNorm1d(fc4_size)
-
-        # Activation functions
-        self.activation = get_activation(activation)
-        self.softmax = get_activation("softmax")
-
-        self.dropout = nn.Dropout(0.2)
-
-    def forward(self, x):
-        if self.batch_norm:
-            x = self.bnorm1(self.activation(self.fc1(x)))
-            x = self.bnorm2(self.activation(self.fc2(x)))
-            x = self.bnorm3(self.activation(self.dropout(self.fc3(x))))
-            x = self.bnorm4(self.activation(self.dropout(self.fc4(x))))
-        else:
-            x = self.activation(self.fc1(x))
-            x = self.activation(self.fc2(x))
-            x = self.activation(self.dropout(self.fc3(x)))
-            x = self.activation(self.dropout(self.fc4(x)))    
-        
-        if self.continuous_risk:
-            out = self.sigmoid(self.out(x))
-        else:
-            out = self.softmax(self.out(x))
-        return out

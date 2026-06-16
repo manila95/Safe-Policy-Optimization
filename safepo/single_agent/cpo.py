@@ -402,7 +402,7 @@ def main(args, cfg_env=None):
 
         eval_start_time = time.time()
 
-        eval_episodes = 1 if epoch < epochs - 1 else 10
+        eval_episodes = int(100 / args.num_envs)
         if args.use_eval:
             for _ in range(eval_episodes):
                 eval_done = False
@@ -442,15 +442,16 @@ def main(args, cfg_env=None):
             # Evaluate critic performance using fresh rollouts
             critic_metrics = evaluate_critic_performance_from_rollouts(
                 args=args,
-                policy=policy,
-                env=env,
+                policy=policy, 
+                env=eval_env,
                 num_episodes=eval_episodes,
-                max_ep_len=1000,  # Maximum episode length
+                max_ep_len=2000,  # Maximum episode length (full rollout)
                 device=device,
                 gamma=config['gamma'],
                 use_risk=args.use_risk,
                 risk_model=risk_model if args.use_risk else None,
-                create_plots=True
+                create_plots=True,
+                evaluation_horizon=1000  # Only evaluate first 1000 states for fair comparison
             )
 
             # Log the critic evaluation metrics

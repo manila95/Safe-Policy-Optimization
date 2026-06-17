@@ -35,7 +35,7 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
 
 from safepo.common.buffer import VectorizedOnPolicyBuffer
-from safepo.common.env import make_sa_mujoco_env, make_sa_isaac_env
+from safepo.common.env import make_sa_isaac_env, make_sa_safetygym_env, make_sa_gymrobot_env
 from safepo.common.logger import EpochLogger
 from safepo.common.model import ActorVCritic
 from safepo.single_agent.utils import *
@@ -163,6 +163,14 @@ def fvp(
 
     return flat_grad_grad_kl + params * 0.1
 
+def env_fn(env_id):
+    if "Safety" in env_id:
+        return make_sa_safetygym_env
+    else:
+        return make_sa_gymrobot_env
+
+
+
 
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
@@ -183,10 +191,10 @@ def main(args, cfg_env=None):
     risk_size = args.quantile_num if args.risk_type == "quantile" else 2
 
     if args.task not in isaac_gym_map.keys():
-        env, obs_space, act_space = make_sa_mujoco_env(
-            num_envs=args.num_envs, env_id=args.task, seed=args.seed
+        env, obs_space, act_space = env_fn(args.task)(
+            args, num_envs=args.num_envs, env_id=args.task, seed=args.seed, num_steps=1000
         )
-        eval_env, _, _ = make_sa_mujoco_env(num_envs=1, env_id=args.task, seed=None)
+        eval_env, _, _ = env_fn(args.task)(args, num_envs=args.num_envs, env_id=args.task, seed=None, num_steps=2000)
         config = default_cfg
 
     else:
